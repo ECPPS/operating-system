@@ -36,6 +36,36 @@
 
 .extern KeHandleInterruptFrame
 
+    .global KeCaptureContext
+KeCaptureContext:
+    pushfq
+    mov %rax, 0x78(%rcx)
+    mov %rcx, 0x80(%rcx)
+    mov %rdx, 0x88(%rcx)
+    mov %rbx, 0x90(%rcx)
+    mov %rsp, 0x98(%rcx)
+    mov %rbp, 0xA0(%rcx)
+    mov %rsi, 0xA8(%rcx)
+    mov %rdi, 0xB0(%rcx)
+    mov %r8, 0xB8(%rcx)
+    mov %r9, 0xC0(%rcx)
+    mov %r10, 0xC8(%rcx)
+    mov %r11, 0xD0(%rcx)
+    mov %r12, 0xD8(%rcx)
+    mov %r13, 0xE0(%rcx)
+    mov %r14, 0xE8(%rcx)
+    mov %r15, 0xF0(%rcx)
+    fxsave 0x100(%rcx)
+    mov %cs, 0x38(%rcx)
+    mov %ds, 0x3a(%rcx)
+    mov %es, 0x3c(%rcx)
+    mov %fs, 0x3e(%rcx)
+    mov %gs, 0x40(%rcx)
+    mov %ss, 0x42(%rcx)
+    stmxcsr 0x34(%rcx)
+    add $8, %rsp
+    ret
+
 .macro DEFINE_ISR n, hasError=0
 .global InterruptStub\n
 InterruptStub\n:

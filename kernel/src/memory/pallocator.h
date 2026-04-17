@@ -78,7 +78,8 @@ namespace memory
           std::atomic<std::size_t> fsCachePages{};
 
           bool Initialise(structures::LinkedList<arch::MemoryDescriptor> memoryDescriptors,
-                          std::uintptr_t kernelPhysicalBase, std::uintptr_t kernelVirtualBase, std::size_t kernelSize);
+                          std::uintptr_t kernelPhysicalBase, std::uintptr_t kernelVirtualBase, std::size_t kernelSize,
+                          std::uintptr_t& mpPage);
           void MarkPageActive(std::uintptr_t physicalAddress, PFNUse use);
           std::uintptr_t AllocatePage(PFNUse use);
           std::uintptr_t AllocatePageOverwrite(PFNUse use);

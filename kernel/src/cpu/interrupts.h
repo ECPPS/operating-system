@@ -1,6 +1,92 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+
+#pragma pack(push, 1)
+struct RSDPDescriptor
+{
+     char signature[8]; // "RSD PTR " NOLINT
+     std::uint8_t checksum;
+     char oemId[6];         // NOLINT
+     std::uint8_t revision; // 0 for ACPI 1.0; 2 for ACPI 2.0+
+     std::uint32_t rsdtAddress;
+};
+struct RSDPDescriptor2
+{
+     RSDPDescriptor firstPart;
+     std::uint32_t length;
+     std::uint64_t xsdtAddress;
+     std::uint8_t extendedChecksum;
+     std::uint8_t reserved[3]; // NOLINT
+};
+struct ACPISDTHeader
+{
+     char signature[4]; // NOLINT
+     std::uint32_t length;
+     std::uint8_t revision;
+     std::uint8_t checksum;
+     char oemId[6];      // NOLINT
+     char oemTableId[8]; // NOLINT
+     std::uint32_t oemRevision;
+     std::uint32_t creatorId;
+     std::uint32_t creatorRevision;
+};
+
+struct MCFGAllocationClass
+{
+     std::uint64_t baseAddress;
+     std::uint16_t pciSegmentGroup;
+     std::uint8_t startBusNumber;
+     std::uint8_t endBusNumber;
+     std::uint32_t reserved;
+};
+
+struct RSDT
+{
+     ACPISDTHeader header;
+     std::uint32_t tablePointers[0]; // NOLINT
+};
+
+struct XSDT
+{
+     ACPISDTHeader header;
+     std::uint64_t tablePointers[0]; // NOLINT
+};
+
+struct MADT
+{
+     ACPISDTHeader header;
+     std::uint32_t localApicAddress;
+     std::uint32_t flags;
+     std::uint8_t entries[]; // NOLINT
+};
+
+struct MADTEntry
+{
+     std::uint8_t type;
+     std::uint8_t length;
+};
+
+struct MADTEntryLAPIC
+{
+     MADTEntry header; // type = 0, length = 8
+     std::uint8_t apicProcessorId;
+     std::uint8_t apicId;
+     std::uint32_t flags;
+     std::uint32_t signature;
+     std::uint32_t featureFlags;
+     std::uint64_t reserved;
+};
+
+struct MCFG
+{
+     ACPISDTHeader header;
+     std::uint64_t reserved;
+     MCFGAllocationClass allocationClasses[]; // NOLINT
+};
+
+#pragma pack(pop)
 
 namespace cpu
 {
@@ -89,19 +175,19 @@ namespace cpu
      {
           switch (irql)
           {
-          case IRQL::Passive:
-          case IRQL::Apc:
-          case IRQL::Dispatch: return 0;
-
-          case IRQL::DeviceLow: return 2;
-          case IRQL::DeviceBelowNormal: return 3;
-          case IRQL::DeviceNormal: return 4;
-          case IRQL::DeviceHigh: return 5;
-          case IRQL::Network: return 6;
-          case IRQL::Storage: return 7;
-          case IRQL::DeviceRealTime: return 8;
+          case IRQL::Passive: return 0x0;
+          case IRQL::Apc: return 0x1;
+          case IRQL::Dispatch: return 0x2;
+          case IRQL::DeviceLow: return 0x3;
+          case IRQL::DeviceBelowNormal: return 0x4;
+          case IRQL::DeviceNormal: return 0x5;
+          case IRQL::DeviceHigh: return 0x6;
+          case IRQL::Network: return 0x7;
+          case IRQL::Storage: return 0x8;
+          case IRQL::DeviceRealTime: return 0x9;
+          case IRQL::Clock: return 0xD;
           case IRQL::IPI: return 0xE;
-          case IRQL::Clock: return 0xF;
+          default: return 0x0;
           }
           return 0;
      }
@@ -109,32 +195,50 @@ namespace cpu
      {
           switch (cls)
           {
-          case 0: return IRQL::Dispatch; // Passive/Apc/Dispatch all here
-          case 2: return IRQL::DeviceLow;
-          case 3: return IRQL::DeviceBelowNormal;
-          case 4: return IRQL::DeviceNormal;
-          case 5: return IRQL::DeviceHigh;
-          case 6: return IRQL::Network;
-          case 7: return IRQL::Storage;
-          case 8: return IRQL::DeviceRealTime;
+          case 0x0: return IRQL::Passive;
+          case 0x1: return IRQL::Apc;
+          case 0x2: return IRQL::Dispatch;
+          case 0x3: return IRQL::DeviceLow;
+          case 0x4: return IRQL::DeviceBelowNormal;
+          case 0x5: return IRQL::DeviceNormal;
+          case 0x6: return IRQL::DeviceHigh;
+          case 0x7: return IRQL::Network;
+          case 0x8: return IRQL::Storage;
+          case 0x9: return IRQL::DeviceRealTime;
+          case 0xA: return IRQL::DeviceRealTime;
+          case 0xB: return IRQL::DeviceRealTime;
+          case 0xC: return IRQL::DeviceRealTime;
+          case 0xD: return IRQL::Clock;
           case 0xE: return IRQL::IPI;
           case 0xF: return IRQL::Clock;
-          default: return IRQL::Dispatch;
+          default: return IRQL::Passive;
           }
      }
 
      constexpr IRQL KeVectorToIrql(std::uint8_t vector) noexcept { return KeApicClassToIrql(vector >> 4); }
 } // namespace cpu
 
-using InterruptHandler = bool (*)(cpu::IInterruptFrame&);
+using InterruptHandler = bool (*)(cpu::IInterruptFrame&, void* argument);
 
-void KiInitialiseInterrupts(std::uintptr_t acpiPhysical);
+bool KiInitialiseInterrupts(std::uintptr_t acpiPhysical);
 void HandleInterrupt(cpu::IInterruptFrame& frame);
 void KeAcknowledgeInterrupt();
-void KeSetTimerFrequency(std::uint32_t frequency);
+void KeSetTimerFrequency(std::uint32_t frequency, bool isBSP = true);
 std::uint64_t KeReadLowResolutionTimer();
 std::uint64_t KeReadHighResolutionTimer();
 std::uint64_t KeReadLowResolutionTimerFrequency();
 std::uint64_t KeReadHighResolutionTimerFrequency();
 std::uint64_t KeCurrentSystemTime(); // milliseconds!!!
-void KeRegisterInterruptHandler(cpu::InterruptVector physical, cpu::InterruptVector vector, InterruptHandler handler);
+double KeReadHighResolutionTimerMS();
+void KeRegisterInterruptHandler(cpu::InterruptVector physical, cpu::InterruptVector vector, InterruptHandler handler,
+                                void* argument = nullptr);
+cpu::IRQL KeRaiseIrql(cpu::IRQL newIrql);
+void KeLowerIrql(cpu::IRQL newIrql);
+void KeDrawBgrt();
+std::uintptr_t KiPCFromInterruptFrame(void* frame);
+
+template <typename TLambda> struct [[nodiscard]] Defer : TLambda
+{
+     explicit Defer(TLambda lambda) : TLambda(std::move(lambda)) {}
+     ~Defer() { (*this)(); }
+};

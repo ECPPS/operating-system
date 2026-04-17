@@ -5,11 +5,17 @@
 #include <memory>
 #include <new>
 
+inline CHAR16* operator""_16(const wchar_t* string, [[maybe_unused]] const std::size_t length)
+{
+     return const_cast<CHAR16*>( // NOLINT(cppcoreguidelines-pro-type-const-cast)
+         reinterpret_cast<const CHAR16*>(string));
+}
+
 namespace bootloader
 {
      ImageLoader::ImageLoader(EFI_BOOT_SERVICES* bootServices)
          : _bootServices(bootServices), _lastStatus(EFI_SUCCESS), _baseAddress(nullptr), _entryPoint(nullptr),
-           _imageSize(0)
+           _imageSize(0), _videoBaseAddress(nullptr), _videoImageSize(0)
      {
      }
 
@@ -54,11 +60,15 @@ namespace bootloader
           const DataDirectory& relocDir = ntHeader.optionalHeader.dataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
           if (relocDir.virtualAddress == 0 || relocDir.size == 0) return;
 
-          auto* relocation =
-              reinterpret_cast<ImageBaseRelocation*>(static_cast<std::byte*>(imageBase) + relocDir.virtualAddress);
+          auto* reloc = reinterpret_cast<std::byte*>(imageBase) + relocDir.virtualAddress;
+          auto* end = reloc + relocDir.size;
 
-          while (relocation->virtualAddress != 0)
+          while (reloc < end)
           {
+               auto* relocation = reinterpret_cast<ImageBaseRelocation*>(reloc);
+
+               if (relocation->sizeOfBlock == 0) break; // safety guard
+
                std::uint8_t* dest = static_cast<std::uint8_t*>(imageBase) + relocation->virtualAddress;
                std::uint16_t* relocInfo = reinterpret_cast<std::uint16_t*>(reinterpret_cast<std::byte*>(relocation) +
                                                                            sizeof(ImageBaseRelocation));
@@ -78,8 +88,7 @@ namespace bootloader
                     }
                }
 
-               relocation = reinterpret_cast<ImageBaseRelocation*>(reinterpret_cast<std::byte*>(relocation) +
-                                                                   relocation->sizeOfBlock);
+               reloc += relocation->sizeOfBlock;
           }
      }
 
@@ -105,6 +114,8 @@ namespace bootloader
 
           std::uint64_t delta = reinterpret_cast<std::uint64_t>(imageBase) - ntHeader.optionalHeader.imageBase;
           if (delta) ApplyRelocations(imageBase, ntHeader, delta);
+          this->_videoBaseAddress = imageBase;
+          this->_videoImageSize = imageSize;
 
           return imageBase;
      }
@@ -218,6 +229,7 @@ namespace bootloader
           const auto* sectionHeaders =
               reinterpret_cast<const SectionHeader*>(imageData.data() + dosHeader.eLfanew + sizeof(std::uint32_t) +
                                                      sizeof(CoffFileHeader) + ntHeader.fileHeader.sizeOfOptionalHeader);
+
           MapSections(imageData, imageBase, sectionHeaders, ntHeader.fileHeader.numberOfSections);
 
           std::uint64_t delta = reinterpret_cast<std::uint64_t>(imageBase) - ntHeader.optionalHeader.imageBase;
@@ -231,13 +243,13 @@ namespace bootloader
 
           this->_lastStatus = EFI_SUCCESS;
           if (outStatus) *outStatus = this->_lastStatus;
+
           return imageBase;
      }
 
      void ImageLoader::RelocateToVirtual(std::uintptr_t virtualBase)
      {
           if (!this->_baseAddress) return;
-
           const DosHeader& dosHeader = *static_cast<const DosHeader*>(this->_baseAddress);
           const NtHeaders& ntHeader =
               *reinterpret_cast<const NtHeaders*>(static_cast<std::byte*>(this->_baseAddress) + dosHeader.eLfanew);
@@ -246,13 +258,16 @@ namespace bootloader
           std::int64_t delta = static_cast<std::int64_t>(virtualBase) - static_cast<std::int64_t>(physicalBase);
 
           const DataDirectory& relocDir = ntHeader.optionalHeader.dataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+
           if (relocDir.virtualAddress != 0 && relocDir.size != 0)
           {
-               auto* relocation = reinterpret_cast<ImageBaseRelocation*>(static_cast<std::byte*>(this->_baseAddress) +
-                                                                         relocDir.virtualAddress);
+               auto* reloc = reinterpret_cast<std::byte*>(this->_baseAddress) + relocDir.virtualAddress;
+               auto* end = reloc + relocDir.size;
 
-               while (relocation->virtualAddress != 0)
+               while (reloc != end)
                {
+                    auto* relocation = reinterpret_cast<ImageBaseRelocation*>(reloc);
+
                     std::uint8_t* dest = static_cast<std::uint8_t*>(this->_baseAddress) + relocation->virtualAddress;
                     std::uint16_t* relocInfo = reinterpret_cast<std::uint16_t*>(
                         reinterpret_cast<std::byte*>(relocation) + sizeof(ImageBaseRelocation));
@@ -277,8 +292,7 @@ namespace bootloader
                          }
                     }
 
-                    relocation = reinterpret_cast<ImageBaseRelocation*>(reinterpret_cast<std::byte*>(relocation) +
-                                                                        relocation->sizeOfBlock);
+                    reloc += relocation->sizeOfBlock;
                }
           }
 

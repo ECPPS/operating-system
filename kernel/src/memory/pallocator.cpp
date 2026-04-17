@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "utils/arch.h"
 #include "utils/identify.h"
+#include "utils/kdbg.h"
 #include "utils/memory.h"
 #include "utils/operations.h"
 
@@ -13,8 +14,10 @@ namespace memory
 
      NO_ASAN bool PhysicalMemoryAllocator::Initialise(structures::LinkedList<arch::MemoryDescriptor> memoryDescriptors,
                                                       std::uintptr_t kernelPhysicalBase,
-                                                      std::uintptr_t kernelVirtualBase, std::size_t kernelSize)
+                                                      std::uintptr_t kernelVirtualBase, std::size_t kernelSize,
+                                                      std::uintptr_t& mpPage)
      {
+          debugging::DbgWrite(u8"Initialising physical memory allocator...\r\n");
           std::size_t totalPages{};
           std::uintptr_t minPage = ~0ull;
           std::uintptr_t maxPage{};
@@ -97,8 +100,8 @@ namespace memory
                     use = PFNUse::PageTable;
                     break;
                case arch::MemoryType::ACPIReclaimMemory:
-                    region = PFNRegion::Free;
-                    use = PFNUse::Unused;
+                    region = PFNRegion::Active;
+                    use = PFNUse::NonPagedPool;
                     break;
                case arch::MemoryType::Reserved:
                case arch::MemoryType::MemoryMappedIO:
@@ -125,6 +128,17 @@ namespace memory
 
                     if (pfn >= stolenStartPfn && pfn < stolenEndPfn)
                     {
+                         database[dbIdx].use = PFNUse::KernelHeap;
+                         database[dbIdx].region = PFNRegion::Active;
+                         database[dbIdx].referenceCount = 1;
+
+                         activePages.fetch_add(1, std::memory_order::relaxed);
+                         kernelHeapPages.fetch_add(1, std::memory_order::relaxed);
+                         continue;
+                    }
+                    if (mpPage == ~0 && pfn * PageSize < 1024uz * 1024uz)
+                    {
+                         mpPage = pfn * PageSize;
                          database[dbIdx].use = PFNUse::KernelHeap;
                          database[dbIdx].region = PFNRegion::Active;
                          database[dbIdx].referenceCount = 1;

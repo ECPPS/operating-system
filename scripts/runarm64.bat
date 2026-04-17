@@ -88,6 +88,10 @@ qemu-system-aarch64.exe ^
      -m 512M ^
      -net none ^
      -device ramfb ^
+     -device qemu-xhci,id=xhci ^
+     -device usb-kbd,bus=xhci.0 ^
+     -device usb-mouse,bus=xhci.0 ^
+     -device virtio-gpu-pci ^
      -serial stdio -d int -D qemu_arm.txt -no-reboot -no-shutdown ^
      -monitor tcp:127.0.0.1:4445,server,nowait
 

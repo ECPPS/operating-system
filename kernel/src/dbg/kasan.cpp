@@ -6,7 +6,7 @@
 #include "../kinit.h"
 #include "utils/kdbg.h"
 
-#define PRINT_SELF debugging::DbgWrite(__FUNCTION__ u8"\r\n")
+#define PRINT_SELF
 
 static void* g_shadowMemory{};
 extern "C" std::uintptr_t __asan_shadow_memory_dynamic_address = 0xDFFFA00100000000;
@@ -113,13 +113,9 @@ template <std::size_t N> NO_ASAN void __asan_store(std::uintptr_t addr)
      // TODO: implement
 }
 
-ASAN_STUB void __asan_loadN(std::uintptr_t addr, std::size_t size)
-{
-}
+ASAN_STUB void __asan_loadN(std::uintptr_t addr, std::size_t size) {}
 
-ASAN_STUB void __asan_storeN(std::uintptr_t addr, std::size_t size)
-{
-}
+ASAN_STUB void __asan_storeN(std::uintptr_t addr, std::size_t size) {}
 
 // load
 ASAN_STUB void __asan_load1(std::uintptr_t addr) { __asan_load<1>(addr); }

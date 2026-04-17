@@ -4,6 +4,7 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -13,10 +14,23 @@
 namespace debugging
 {
      constexpr std::size_t MaxSerialLine = 256;
+     enum struct FormatKind : std::uint8_t
+     {
+          Default,
+          Decimal,
+          HexLower,
+          HexUpper,
+          Base2
+     };
+
+     struct FormatSpec
+     {
+          FormatKind kind{FormatKind::Default};
+     };
 
      template <typename T> struct SerialFormatter
      {
-          NO_ASAN static void Write(const T& unnamed)
+          NO_ASAN static void Write(const T& unnamed, const FormatSpec& spec = {})
           {
                static_assert(sizeof(unnamed) == 0, "SerialFormatter not implemented for this type");
           }
@@ -24,12 +38,15 @@ namespace debugging
 
      template <> struct SerialFormatter<char8_t>
      {
-          NO_ASAN static void Write(char8_t value) { operations::WriteSerialCharacter(static_cast<char>(value)); }
+          NO_ASAN static void Write(char8_t value, const FormatSpec& spec = {})
+          {
+               operations::WriteSerialCharacter(static_cast<char>(value));
+          }
      };
 
      template <> struct SerialFormatter<char8_t*>
      {
-          NO_ASAN static void Write(const char8_t* value)
+          NO_ASAN static void Write(const char8_t* value, const FormatSpec& spec = {})
           {
                while (value[0] != 0) operations::WriteSerialCharacter(static_cast<char>(*value++));
           }
@@ -37,7 +54,7 @@ namespace debugging
 
      template <> struct SerialFormatter<std::u8string>
      {
-          NO_ASAN static void Write(const std::u8string& value)
+          NO_ASAN static void Write(const std::u8string& value, const FormatSpec& spec = {})
           {
                for (char8_t c : value) operations::WriteSerialCharacter(static_cast<char>(c));
           }
@@ -45,7 +62,7 @@ namespace debugging
 
      template <> struct SerialFormatter<std::string>
      {
-          NO_ASAN static void Write(const std::string& value)
+          NO_ASAN static void Write(const std::string& value, const FormatSpec& spec = {})
           {
                for (char c : value) operations::WriteSerialCharacter(c);
           }
@@ -53,7 +70,7 @@ namespace debugging
 
      template <> struct SerialFormatter<const char8_t*>
      {
-          NO_ASAN static void Write(const char8_t* value)
+          NO_ASAN static void Write(const char8_t* value, const FormatSpec& spec = {})
           {
                while (value[0] != 0) operations::WriteSerialCharacter(static_cast<char>(*value++));
           }
@@ -61,7 +78,7 @@ namespace debugging
 
      template <> struct SerialFormatter<std::string_view>
      {
-          NO_ASAN static void Write(const std::string_view value)
+          NO_ASAN static void Write(const std::string_view value, const FormatSpec& spec = {})
           {
                operations::WriteSerialString(value.data(), value.size());
           }
@@ -69,17 +86,31 @@ namespace debugging
 
      template <std::integral TInteger> struct SerialFormatter<TInteger>
      {
-          NO_ASAN static void Write(TInteger value)
+          NO_ASAN static void Write(TInteger value, const FormatSpec& spec = {})
           {
-               std::array<char, 32> buffer{};
-               const auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+               std::array<char, 64> buffer{};
+
+               TInteger base = 10;
+               if (spec.kind == FormatKind::HexLower || spec.kind == FormatKind::HexUpper) base = TInteger(16);
+               else if (spec.kind == FormatKind::Base2) base = TInteger(2);
+
+               auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value, base);
+
+               if (spec.kind == FormatKind::HexUpper)
+               {
+                    for (auto& c : std::span(buffer.data(), result.ptr))
+                    {
+                         if (c >= 'a' && c <= 'f') c -= 32;
+                    }
+               }
+
                operations::WriteSerialString(buffer.data(), result.ptr - buffer.data());
           }
      };
 
      template <> struct SerialFormatter<bool>
      {
-          NO_ASAN static void Write(bool value)
+          NO_ASAN static void Write(bool value, const FormatSpec& spec = {})
           {
                operations::WriteSerialString(value ? "true" : "false", value ? 4 : 5);
           }
@@ -87,7 +118,7 @@ namespace debugging
 
      template <typename T> struct SerialFormatter<T*>
      {
-          NO_ASAN static void Write(T* ptr)
+          NO_ASAN static void Write(T* ptr, const FormatSpec& spec = {})
           {
                std::array<char, 2 + (sizeof(std::uintptr_t) * 2) + 1> buffer{};
                auto* destination = buffer.data();
@@ -103,13 +134,13 @@ namespace debugging
                     *destination++ = hexDigits[(value >> shift) & 0xF];
                }
                *destination = 0;
-               SerialFormatter<char8_t*>::Write(reinterpret_cast<char8_t*>(buffer.data()));
+               SerialFormatter<char8_t*>::Write(reinterpret_cast<char8_t*>(buffer.data()), spec);
           }
      };
 
      template <> struct SerialFormatter<std::byte>
      {
-          NO_ASAN static void Write(std::byte value)
+          NO_ASAN static void Write(std::byte value, const FormatSpec& spec = {})
           {
                std::array<char, 5> buffer{};
                auto* destination = buffer.data();
@@ -121,13 +152,13 @@ namespace debugging
                     *destination++ = hexDigits[(std::to_integer<int>(value) >> shift) & 0xF];
                }
                *destination = 0;
-               SerialFormatter<char8_t*>::Write(reinterpret_cast<char8_t*>(buffer.data()));
+               SerialFormatter<char8_t*>::Write(reinterpret_cast<char8_t*>(buffer.data()), spec);
           }
      };
 
      template <std::size_t N> struct SerialFormatter<char8_t[N]> // NOLINT
      {
-          NO_ASAN static void Write(const char8_t (&value)[N]) // NOLINT
+          NO_ASAN static void Write(const char8_t (&value)[N], const FormatSpec& spec = {}) // NOLINT
           {
                operations::WriteSerialString(value, N - 1);
           }
@@ -139,14 +170,14 @@ namespace debugging
           std::tuple<TArgs...> tupleArgs(std::forward<TArgs>(args)...);
           std::size_t argIndex = 0;
 
-          auto printArg = [&](std::size_t index)
+          auto printArg = [&](std::size_t index, const FormatSpec& spec = {})
           {
                std::apply(
                    [&]<typename... T>(T&&... unpackedArgs)
                    {
                         std::size_t i = 0;
                         ((i++ == index ? (void)SerialFormatter<typename std::remove_cvref_t<T>>::Write(
-                                             std::forward<T>(unpackedArgs))
+                                             std::forward<T>(unpackedArgs), spec)
                                        : (void)0),
                          ...);
                    },
@@ -155,15 +186,37 @@ namespace debugging
 
           while (*ptr)
           {
-               if (ptr[0] == '{' && ptr[1] == '}')
+               if (ptr[0] == '{')
                {
-                    printArg(argIndex++);
-                    ptr += 2;
+                    ptr++;
+
+                    FormatSpec spec{};
+
+                    if (*ptr == ':')
+                    {
+                         ptr++;
+
+                         switch (*ptr)
+                         {
+                         case 'x': spec.kind = FormatKind::HexLower; break;
+                         case 'X': spec.kind = FormatKind::HexUpper; break;
+                         case 'd': spec.kind = FormatKind::Decimal; break;
+                         case 'b': spec.kind = FormatKind::Base2; break;
+                         default: break;
+                         }
+
+                         ptr++;
+                    }
+
+                    if (*ptr == '}')
+                    {
+                         printArg(argIndex++, spec);
+                         ptr++;
+                         continue;
+                    }
                }
-               else
-               {
-                    SerialFormatter<char8_t>::Write(static_cast<char8_t>(*ptr++));
-               }
+
+               SerialFormatter<char8_t>::Write(static_cast<char8_t>(*ptr++), {});
           }
      }
 

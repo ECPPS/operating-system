@@ -10,8 +10,7 @@
 
 namespace object
 {
-
-     inline constexpr std::size_t kObjectNameCapacity = 24;
+     inline constexpr std::size_t kObjectNameCapacity = 64;
 
      struct ObjectName
      {

@@ -20,7 +20,9 @@ namespace bootloader
 
           bool SetupPageTables(void* imageBase, std::size_t imageSize, std::uintptr_t stackPointer,
                                const arch::Framebuffer& framebuffer);
-          bool RemapKernelVirtual(void* physicalBase, std::size_t imageSize, std::uintptr_t virtualBase);
+          bool RemapKernelVirtual(void* physicalBase, std::size_t imageSize, std::uintptr_t virtualBase,
+                                  void* videoDllPhysicalBase, std::size_t videoDllImageSize,
+                                  std::uintptr_t videoDllVirtualBase);
           bool MapKernelStack(std::uintptr_t physicalBase, std::size_t stackSize, std::uintptr_t virtualBase);
           bool ExitBootServices(UINTN* outMapKey);
           static void ReclaimBootServices(arch::LoaderParameterBlock* loaderBlock);
@@ -54,13 +56,7 @@ namespace bootloader
           bool MapEfiRuntimeRegions();
           void TrackMappedRegion(std::uintptr_t start, std::size_t size, const wchar_t* name);
 
-     public:
-          void PrintMappedRegions(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL* conOut);
-          void DebugPrintPageTableEntry(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL* conOut, std::uintptr_t virtualAddr);
-
-     private:
           static void* AllocatePageTableMemory(std::size_t size);
-          bool MapPageTableStructures();
 
           static EFI_BOOT_SERVICES* s_bootServices;
      };

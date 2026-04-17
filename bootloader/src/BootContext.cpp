@@ -3,7 +3,9 @@
 #include <utils/identify.h>
 #include <utils/struct.h>
 #include <algorithm>
+#include "Uefi/UefiBaseType.h"
 #include "Uefi/UefiMultiPhase.h"
+#include "utils/PE.h"
 #include "utils/memory.h"
 
 inline CHAR16* operator""_16(const wchar_t* string, [[maybe_unused]] const std::size_t length)
@@ -201,7 +203,7 @@ namespace bootloader
           mapping.size = alignedSize;
           mapping.writable = writable;
           mapping.userAccessible = false;
-          mapping.cacheDisable = false;
+          mapping.executable = true;
 
           bool result = memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory);
           if (result) TrackMappedRegion(alignedStart, alignedSize, name);
@@ -317,7 +319,6 @@ namespace bootloader
                mapping.size = 0x1000;
                mapping.writable = true;
                mapping.userAccessible = false;
-               mapping.cacheDisable = false;
 
                if (!memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory))
                {
@@ -341,36 +342,245 @@ namespace bootloader
                     this->_lastStatus = EFI_OUT_OF_RESOURCES;
                     return false;
                }
+               memory::paging::MapPhysicalMemoryDirect(GetPageTableRoot(),
+                                                       framebuffer.totalSize + framebuffer.physicalStart,
+                                                       AllocatePageTableMemory, framebuffer.physicalStart);
           }
-
           if (this->_maxPhysicalAddress > 0)
                memory::paging::MapPhysicalMemoryDirect(GetPageTableRoot(), this->_maxPhysicalAddress,
                                                        AllocatePageTableMemory);
+          else
+          {
+               this->_lastStatus = EFI_OUT_OF_RESOURCES;
+               return false;
+          }
 
           this->_lastStatus = EFI_SUCCESS;
           return true;
      }
 
-     bool BootContext::RemapKernelVirtual(void* physicalBase, std::size_t imageSize, std::uintptr_t virtualBase)
+     bool BootContext::RemapKernelVirtual(void* physicalBase, std::size_t imageSize, std::uintptr_t virtualBase,
+                                          void* videoDllPhysicalBase, std::size_t videoDllImageSize,
+                                          std::uintptr_t videoDllVirtualBase)
      {
           if (this->_pageTableRoot == 0) return false;
 
-          std::uintptr_t physAddr = reinterpret_cast<std::uintptr_t>(physicalBase);
-          std::uintptr_t alignedPhysStart = physAddr & ~0xFFFull;
-          std::uintptr_t alignedVirtStart = virtualBase & ~0xFFFull;
-          std::size_t alignedSize = ((imageSize + 0xFFF) & ~0xFFFull) + (physAddr - alignedPhysStart);
+          {
+               auto* const kernelBytes = reinterpret_cast<std::byte*>(physicalBase);
+               std::uintptr_t physAddr = reinterpret_cast<std::uintptr_t>(physicalBase);
 
-          memory::PageMapping mapping{};
-          mapping.virtualAddress = alignedVirtStart;
-          mapping.physicalAddress = alignedPhysStart;
-          mapping.size = alignedSize;
-          mapping.writable = true;
-          mapping.userAccessible = false;
-          mapping.cacheDisable = false;
+               auto* kernelDos = reinterpret_cast<DosHeader*>(kernelBytes);
+               auto* kernelNt = reinterpret_cast<NtHeaders*>(kernelBytes + kernelDos->eLfanew);
+               auto& kernelOpt = kernelNt->optionalHeader;
 
-          bool result = memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory);
-          if (result) TrackMappedRegion(alignedVirtStart, alignedSize, L"Kernel Virtual");
-          return result;
+               {
+                    const std::size_t headerSize = (kernelOpt.sizeOfHeaders + 0xFFF) & ~0xFFFull;
+
+                    memory::PageMapping mapping{};
+                    mapping.virtualAddress = virtualBase;
+                    mapping.physicalAddress = physAddr;
+                    mapping.size = headerSize;
+                    mapping.writable = false;
+                    mapping.userAccessible = false;
+
+                    if (!memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory)) return false;
+
+                    TrackMappedRegion(virtualBase, headerSize, L"Kernel Headers");
+               }
+
+               const std::uint16_t numKernelSections = kernelNt->fileHeader.numberOfSections;
+               auto* kernelSections =
+                   reinterpret_cast<SectionHeader*>(kernelBytes + kernelDos->eLfanew + sizeof(std::uint32_t) +
+                                                    sizeof(CoffFileHeader) + kernelNt->fileHeader.sizeOfOptionalHeader);
+
+               for (std::uint16_t i = 0; i < numKernelSections; i++)
+               {
+                    const SectionHeader& sec = kernelSections[i];
+
+                    const std::uint32_t mapSize = sec.virtualSize > 0 ? sec.virtualSize : sec.sizeOfRawData;
+                    if (mapSize == 0) continue;
+
+                    const std::uintptr_t secPhys = physAddr + sec.virtualAddress;
+                    const std::uintptr_t secVirt = virtualBase + sec.virtualAddress;
+                    const std::size_t secSize = (mapSize + 0xFFF) & ~0xFFFull;
+
+                    const bool writable = (sec.characteristics & 0x80000000) != 0;
+                    const bool executable = (sec.characteristics & 0x20000000) != 0;
+
+                    memory::PageMapping mapping{};
+                    mapping.virtualAddress = secVirt & ~0xFFFull;
+                    mapping.physicalAddress = secPhys & ~0xFFFull;
+                    mapping.size = secSize;
+                    mapping.writable = writable;
+                    mapping.executable = executable;
+                    mapping.userAccessible = false;
+
+                    if (!memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory)) return false;
+
+                    TrackMappedRegion(secVirt & ~0xFFFull, secSize, L"Kernel Section");
+               }
+          }
+
+          if (videoDllPhysicalBase == nullptr || videoDllImageSize == 0 || videoDllVirtualBase == 0) return true;
+
+          auto* const dllBytes = reinterpret_cast<std::byte*>(videoDllPhysicalBase);
+          const std::uintptr_t dllPhys = reinterpret_cast<std::uintptr_t>(videoDllPhysicalBase);
+
+          auto* dosHeader = reinterpret_cast<DosHeader*>(dllBytes);
+          if (dosHeader->eMagic != 0x5A4D) return false;
+
+          auto* ntHeaders = reinterpret_cast<NtHeaders*>(dllBytes + dosHeader->eLfanew);
+          if (ntHeaders->signature != 0x4550) return false;
+
+          auto& optHeader = ntHeaders->optionalHeader;
+          const std::uint16_t numSections = ntHeaders->fileHeader.numberOfSections;
+
+          auto* sectionHdr =
+              reinterpret_cast<SectionHeader*>(dllBytes + dosHeader->eLfanew + sizeof(std::uint32_t) // PE signature
+                                               + sizeof(CoffFileHeader) + ntHeaders->fileHeader.sizeOfOptionalHeader);
+
+          {
+               const std::size_t headerSize = (optHeader.sizeOfHeaders + 0xFFF) & ~0xFFFull;
+
+               memory::PageMapping mapping{};
+               mapping.virtualAddress = videoDllVirtualBase;
+               mapping.physicalAddress = dllPhys;
+               mapping.size = headerSize;
+               mapping.writable = false;
+               mapping.userAccessible = false;
+
+               if (!memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory)) return false;
+
+               TrackMappedRegion(videoDllVirtualBase, headerSize, L"BootVideo Headers");
+          }
+
+          for (std::uint16_t i = 0; i < numSections; i++)
+          {
+               const SectionHeader& sec = sectionHdr[i];
+
+               const std::uint32_t rawSize = sec.sizeOfRawData;
+               if (rawSize == 0) continue;
+
+               const std::uintptr_t secPhys = dllPhys + sec.virtualAddress; // where ImageLoader put it
+               const std::uintptr_t secVirt = videoDllVirtualBase + sec.virtualAddress;
+               const std::size_t secSize = (rawSize + 0xFFF) & ~0xFFFull;
+
+               const bool writable = (sec.characteristics & (0x80000000 | 0x00000080)) != 0;
+
+               memory::PageMapping mapping{};
+               mapping.virtualAddress = secVirt & ~0xFFFull;
+               mapping.physicalAddress = secPhys & ~0xFFFull;
+               mapping.size = secSize;
+               mapping.writable = writable;
+               mapping.userAccessible = false;
+               mapping.executable = (sec.characteristics & 0x20000000) != 0;
+
+               if (!memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory)) return false;
+
+               TrackMappedRegion(secVirt & ~0xFFFull, secSize, L"BootVideo Section");
+          }
+
+          {
+               const DataDirectory& iatDir = optHeader.dataDirectory[12];
+
+               if (iatDir.virtualAddress != 0 && iatDir.size != 0)
+               {
+                    const std::uintptr_t iatPhys = dllPhys + iatDir.virtualAddress;
+                    const std::uintptr_t iatVirt = videoDllVirtualBase + iatDir.virtualAddress;
+                    const std::size_t iatSize = (iatDir.size + 0xFFF) & ~0xFFFull;
+
+                    memory::PageMapping mapping{};
+                    mapping.virtualAddress = iatVirt & ~0xFFFull;
+                    mapping.physicalAddress = iatPhys & ~0xFFFull;
+                    mapping.size = iatSize;
+                    mapping.writable = true;
+                    mapping.userAccessible = false;
+
+                    if (!memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory)) return false;
+
+                    TrackMappedRegion(iatVirt & ~0xFFFull, iatSize, L"BootVideo IAT");
+               }
+          }
+
+          {
+               const std::int64_t delta =
+                   static_cast<std::int64_t>(videoDllVirtualBase) - static_cast<std::int64_t>(dllPhys);
+
+               const DataDirectory& relocDir = optHeader.dataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+
+               if (relocDir.virtualAddress != 0 && relocDir.size != 0 && delta != 0)
+               {
+                    auto* relocPtr = dllBytes + relocDir.virtualAddress;
+                    const auto* relocEnd = relocPtr + relocDir.size;
+
+                    while (relocPtr < relocEnd)
+                    {
+                         auto* block = reinterpret_cast<ImageBaseRelocation*>(relocPtr);
+                         if (block->sizeOfBlock < sizeof(ImageBaseRelocation)) break;
+
+                         const std::uint32_t numEntries =
+                             (block->sizeOfBlock - sizeof(ImageBaseRelocation)) / sizeof(std::uint16_t);
+
+                         auto* entries = reinterpret_cast<std::uint16_t*>(relocPtr + sizeof(ImageBaseRelocation));
+
+                         std::byte* dest = dllBytes + block->virtualAddress;
+
+                         for (std::uint32_t j = 0; j < numEntries; j++)
+                         {
+                              const std::uint16_t type = entries[j] >> 12;
+                              const std::uint16_t offset = entries[j] & 0xFFF;
+
+                              if (type == IMAGE_REL_BASED_DIR64)
+                              {
+                                   auto* patchAddr = reinterpret_cast<std::uint64_t*>(dest + offset);
+                                   *patchAddr += static_cast<std::uint64_t>(delta);
+                              }
+                              else if (type == IMAGE_REL_BASED_HIGHLOW)
+                              {
+                                   auto* patchAddr = reinterpret_cast<std::uint32_t*>(dest + offset);
+                                   *patchAddr += static_cast<std::uint32_t>(delta);
+                              }
+                         }
+
+                         relocPtr += block->sizeOfBlock;
+                    }
+               }
+          }
+
+          {
+               auto* const kernelBytes = reinterpret_cast<std::byte*>(physicalBase);
+
+               auto* kernelDos = reinterpret_cast<DosHeader*>(kernelBytes);
+               auto* kernelNt = reinterpret_cast<NtHeaders*>(kernelBytes + kernelDos->eLfanew);
+
+               const DataDirectory& kernelImportDir =
+                   kernelNt->optionalHeader.dataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+
+               if (kernelImportDir.virtualAddress != 0 && kernelImportDir.size != 0)
+               {
+                    const std::int64_t videoDelta =
+                        static_cast<std::int64_t>(videoDllVirtualBase) - static_cast<std::int64_t>(dllPhys);
+
+                    auto* desc = reinterpret_cast<ImageImportDescriptor*>(kernelBytes + kernelImportDir.virtualAddress);
+
+                    for (; desc->name != 0; ++desc)
+                    {
+                         const char* moduleName = reinterpret_cast<const char*>(kernelBytes + desc->name);
+
+                         if (!std::ranges::equal(std::string_view(moduleName), std::string_view("BootVideo.dll")))
+                              continue;
+
+                         auto* thunk = reinterpret_cast<std::uintptr_t*>(kernelBytes + desc->firstThunk);
+
+                         for (; *thunk != 0; ++thunk) *thunk += static_cast<std::uintptr_t>(videoDelta);
+
+                         break;
+                    }
+               }
+          }
+
+          TrackMappedRegion(videoDllVirtualBase, (videoDllImageSize + 0xFFF) & ~0xFFFull, L"BootVideo Virtual");
+          return true;
      }
 
      bool BootContext::MapKernelStack(std::uintptr_t physicalBase, std::size_t stackSize, std::uintptr_t virtualBase)
@@ -387,7 +597,6 @@ namespace bootloader
           mapping.size = alignedSize;
           mapping.writable = true;
           mapping.userAccessible = false;
-          mapping.cacheDisable = false;
 
           bool result = memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory);
           if (result) TrackMappedRegion(alignedVirtStart, alignedSize, L"Kernel Stack");

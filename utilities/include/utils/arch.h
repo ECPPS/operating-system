@@ -56,6 +56,8 @@ namespace arch
           std::size_t kernelSize{};
           std::uintptr_t stackVirtualBase{};
           std::size_t stackSize{};
+          std::uintptr_t bootVideoVirtualBase{};
+          std::size_t bootVideoImageSize{};
           std::uintptr_t acpiPhysical{};
           std::uint64_t bootTimeSeconds{};
      };
@@ -73,5 +75,5 @@ namespace arch
      // LoaderParameterBlock
      static_assert(alignof(LoaderParameterBlock) == alignof(std::uintptr_t));
      static_assert(sizeof(LoaderParameterBlock) ==
-                   sizeof(std::uintptr_t) + 8 + sizeof(Framebuffer) + (7uz * sizeof(std::uintptr_t)));
+                   sizeof(std::uintptr_t) + 8 + sizeof(Framebuffer) + (9uz * sizeof(std::uintptr_t)));
 } // namespace arch

@@ -23,6 +23,8 @@ namespace bootloader
           [[nodiscard]] void* GetBaseAddress() const noexcept { return this->_baseAddress; }
           [[nodiscard]] std::size_t GetImageSize() const noexcept { return this->_imageSize; }
           [[nodiscard]] EFI_STATUS GetLastStatus() const noexcept { return this->_lastStatus; }
+          [[nodiscard]] void* GetVideoBaseAddress() const noexcept { return this->_videoBaseAddress; }
+          [[nodiscard]] std::size_t GetVideoImageSize() const noexcept { return this->_videoImageSize; }
           void* LoadBootVideo(std::span<const std::byte> imageData);
 
      private:
@@ -31,6 +33,8 @@ namespace bootloader
           void* _baseAddress;
           void* _entryPoint;
           std::size_t _imageSize;
+          void* _videoBaseAddress;
+          std::size_t _videoImageSize;
 
           void ResolveBootVideoImports(void* imageBase, const NtHeaders& ntHeader, void* bootVideoBase);
           void CopyHeaders(std::span<const std::byte> imageData, void* imageBase, std::uint32_t headerSize);

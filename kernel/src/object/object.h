@@ -120,6 +120,8 @@ namespace object
                                          ObjectHeader* header, AccessRights desiredAccess) noexcept;
 
      [[nodiscard]] Handle ObCreateObject(kernel::ProcessControlBlock& pcb, const ObjectAttributes& attributes) noexcept;
+     [[nodiscard]] Handle ObCreateObjectIn(kernel::ProcessControlBlock& pcb, const ObjectAttributes& attributes,
+                                           std::string_view parentPath) noexcept;
 
      [[nodiscard]] Handle ObOpenObjectByPath(kernel::ProcessControlBlock& pcb, std::string_view path,
                                              AccessRights desiredAccess, OpenFlags flags = OpenFlags::None) noexcept;

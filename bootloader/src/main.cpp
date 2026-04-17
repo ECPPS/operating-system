@@ -198,8 +198,10 @@ extern "C" EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* S
           return EFI_INVALID_PARAMETER;
      }
 
+     void* bootVideoBase = imageLoader.LoadBootVideo(bootVideoData);
+
      conOut->OutputString(conOut, L"Loading and relocating kernel image...\r\n"_16);
-     void* imageBase = imageLoader.LoadImage(kernelData, &status, imageLoader.LoadBootVideo(bootVideoData));
+     void* imageBase = imageLoader.LoadImage(kernelData, &status, bootVideoBase);
 
      fileLoader.FreeFile(kernelData);
      EFI_TIME uefiTime{};
@@ -255,7 +257,9 @@ extern "C" EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* S
      }
 
      conOut->OutputString(conOut, L"Remapping kernel to virtual address...\r\n"_16);
-     if (!bootContext.RemapKernelVirtual(imageBase, imageLoader.GetImageSize(), KernelVirtualBase))
+     if (!bootContext.RemapKernelVirtual(imageBase, imageLoader.GetImageSize(), KernelVirtualBase,
+                                         imageLoader.GetVideoBaseAddress(), imageLoader.GetVideoImageSize(),
+                                         VideoVirtualBase))
      {
           conOut->OutputString(conOut, L"Failed to remap kernel, status: "_16);
           PrintStatus(conOut, bootContext.GetLastStatus());
@@ -278,6 +282,7 @@ extern "C" EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* S
      }
 
      conOut->OutputString(conOut, L"Finalising loader block with memory descriptors...\r\n"_16);
+     loaderBlock.memoryDescriptors.head = nullptr;
      if (!bootContext.FinaliseLoaderBlock(&loaderBlock))
      {
           conOut->OutputString(conOut, L"Failed to finalise loader block, status: "_16);
@@ -288,8 +293,10 @@ extern "C" EFI_STATUS EFIAPI EfiMain(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* S
      }
 
      loaderBlock.kernelVirtualBase = KernelVirtualBase;
+     loaderBlock.bootVideoVirtualBase = VideoVirtualBase;
      loaderBlock.kernelPhysicalBase = reinterpret_cast<std::uintptr_t>(imageBase);
      loaderBlock.kernelSize = imageLoader.GetImageSize();
+     loaderBlock.bootVideoImageSize = imageLoader.GetVideoImageSize();
      loaderBlock.stackVirtualBase = KernelStackVirtualBase;
      loaderBlock.stackSize = KernelStackSize;
      loaderBlock.acpiPhysical = acpiPhysical;

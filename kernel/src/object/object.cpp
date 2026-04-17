@@ -520,6 +520,63 @@ namespace object
 
           return handle;
      }
+     Handle ObCreateObjectIn(kernel::ProcessControlBlock& pcb, const ObjectAttributes& attributes,
+                             std::string_view parentPath) noexcept
+     {
+          if (!g_rootDirectoryHeader)
+          {
+               debugging::DbgWrite(u8"[ObCreateObjectIn] Namespace not initialised\r\n");
+               return kInvalidHandle;
+          }
+
+          ObjectStatus status = ObjectStatus::Success;
+          ObjectHeader* parent = OiResolvePath(g_rootDirectoryHeader, parentPath, OpenFlags::None, &status);
+
+          if (!parent)
+          {
+               debugging::DbgWrite(u8"[ObCreateObjectIn] Failed to resolve parent \"{}\" (status {})\r\n", parentPath,
+                                   static_cast<std::int32_t>(status));
+               return kInvalidHandle;
+          }
+
+          if (parent->type != ObjectType::Directory)
+          {
+               debugging::DbgWrite(u8"[ObCreateObjectIn] Parent is not a directory\r\n");
+               OiDereferenceObject(parent);
+               return kInvalidHandle;
+          }
+
+          auto* dirBody = parent->BodyAs<DirectoryBody>();
+          if (!attributes.name.empty() && dirBody->Find(attributes.name) != nullptr)
+          {
+               debugging::DbgWrite(u8"[ObCreateObjectIn] Name collision for \"{}\"\r\n", attributes.name);
+               OiDereferenceObject(parent);
+               return kInvalidHandle;
+          }
+
+          ObjectHeader* header = OiAllocateObjectMemory(attributes.bodySize);
+          if (!header)
+          {
+               debugging::DbgWrite(u8"[ObCreateObjectIn] OOM for object \"{}\"\r\n", attributes.name);
+               OiDereferenceObject(parent);
+               return kInvalidHandle;
+          }
+
+          OiInitialiseHeader(header, attributes.name, attributes.type, attributes.bodySize, attributes.destructor,
+                             attributes.desiredAccess);
+
+          const Handle handle = ObInsertObject(pcb, parent, header, attributes.desiredAccess);
+          if (handle == kInvalidHandle)
+          {
+               debugging::DbgWrite(u8"[ObCreateObjectIn] Insert failed for \"{}\"\r\n", attributes.name);
+               OiFreeObjectMemory(header);
+               OiDereferenceObject(parent);
+               return kInvalidHandle;
+          }
+
+          OiDereferenceObject(parent);
+          return handle;
+     }
 
      void KeRegisterProcessorObject(kernel::ProcessControlBlock& pcb, std::uint32_t logicalIndex,
                                     std::uint32_t apicId) noexcept

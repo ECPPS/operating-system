@@ -9,6 +9,10 @@ void* operator new(std::size_t size)
 {
      return memory::ExAllocatePool(memory::PoolType::NonPaged, size, memory::NonPagedPoolTag);
 }
+void* operator new[](std::size_t size)
+{
+     return memory::ExAllocatePool(memory::PoolType::NonPaged, size, memory::NonPagedPoolTag);
+}
 void operator delete(void* ptr) noexcept { memory::ExFreePool(ptr); }                                      // NOLINT
 void operator delete(void* ptr, [[maybe_unused]] std::size_t size) noexcept { memory::ExFreePool(ptr); }   // NOLINT
 void operator delete[](void* ptr) noexcept { memory::ExFreePool(ptr); }                                    // NOLINT
