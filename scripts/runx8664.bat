@@ -63,7 +63,9 @@ if exist "C:\Program Files\qemu\share\edk2-x86_64-code.fd" (
     set "OVMF_PATH=C:\qemu\share\OVMF_CODE.fd"
 ) else if exist "%~dp0OVMF_CODE.fd" (
     set "OVMF_PATH=%~dp0OVMF_CODE.fd"
-)
+) else if exist "C:\msys64\ucrt64\share\qemu\edk2-x86_64-code.fd" (
+    set "OVMF_PATH=C:\msys64\ucrt64\share\qemu\edk2-x86_64-code.fd"
+) 
 
 if "%OVMF_PATH%"=="" (
      if exist "OVMF_CODE.fd" (
@@ -80,16 +82,15 @@ echo OVMF: !OVMF_PATH!
 
 echo [4/4] Starting QEMU...
 qemu-system-x86_64.exe ^
-     -drive if=pflash,format=raw,readonly=on,file="!OVMF_PATH!" ^
-     -drive file=fat:rw:%BUILD_DIR%\guest_root,format=raw,media=disk ^
-     -m 512M ^
-     -net none ^
-     -vga std ^
-     -serial stdio -M q35 -no-reboot -no-shutdown ^
-     -monitor tcp:127.0.0.1:4445,server,nowait ^
-     -cpu max,+avx,+avx2,+xsave,+xsaveopt,migratable=no,monitor=on -overcommit cpu-pm=on ^
-     -rtc base=utc,clock=rt -usb -device usb-kbd -device usb-mouse ^
-     -device virtio-gpu-pci
+ -M q35 ^
+ -cpu max,+vmx,+avx,+avx2,+xsave,+xsaveopt ^
+ -m 512M ^
+ -drive if=pflash,format=raw,readonly=on,file="!OVMF_PATH!" ^
+ -drive file=fat:rw:%BUILD_DIR%\guest_root,format=raw,media=disk ^
+ -net none ^
+ -vga std ^
+ -serial stdio ^
+ -no-reboot -no-shutdown
 
 echo.
 echo QEMU session ended.

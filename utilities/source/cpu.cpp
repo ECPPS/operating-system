@@ -1,6 +1,7 @@
 #include <utils/cpu.h>
 #include <utils/identify.h>
 #include <utils/operations.h>
+#include "utils/kdbg.h"
 
 #if defined(ARCH_ARM64) && defined(COMPILER_MSVC)
 #include <intrin.h>
@@ -73,19 +74,23 @@ namespace cpu
           std::uint64_t base;
      };
 #pragma pack(pop)
-     static GdtEntry sGdt[6]{};
-     static Tss64 sTss{};
-     static IdtEntry sIdt[256]{};
+} // namespace cpu
+
+namespace cpu
+{
+     cpu::GdtEntry* lpGdt;
+     cpu::Tss64* lpTss;
+     cpu::IdtEntry* lpIdt;
 
      static NO_ASAN void SetGdtEntry(std::size_t index, std::uint32_t base, std::uint32_t limit, std::uint8_t access,
                                      std::uint8_t granularity)
      {
-          sGdt[index].baseLow = base & 0xFFFF;
-          sGdt[index].baseMiddle = (base >> 16) & 0xFF;
-          sGdt[index].baseHigh = (base >> 24) & 0xFF;
-          sGdt[index].limitLow = limit & 0xFFFF;
-          sGdt[index].granularity = ((limit >> 16) & 0x0F) | (granularity & 0xF0);
-          sGdt[index].access = access;
+          lpGdt[index].baseLow = base & 0xFFFF;
+          lpGdt[index].baseMiddle = (base >> 16) & 0xFF;
+          lpGdt[index].baseHigh = (base >> 24) & 0xFF;
+          lpGdt[index].limitLow = limit & 0xFFFF;
+          lpGdt[index].granularity = ((limit >> 16) & 0x0F) | (granularity & 0xF0);
+          lpGdt[index].access = access;
      }
 
      static NO_ASAN void SetTssEntry(std::size_t index, std::uintptr_t tssAddress)
@@ -93,14 +98,14 @@ namespace cpu
           std::uint64_t base = tssAddress;
           std::uint32_t limit = sizeof(Tss64) - 1;
 
-          sGdt[index].limitLow = limit & 0xFFFF;
-          sGdt[index].baseLow = base & 0xFFFF;
-          sGdt[index].baseMiddle = (base >> 16) & 0xFF;
-          sGdt[index].baseHigh = (base >> 24) & 0xFF;
-          sGdt[index].access = 0x89; // Present, TSS
-          sGdt[index].granularity = 0x00;
+          lpGdt[index].limitLow = limit & 0xFFFF;
+          lpGdt[index].baseLow = base & 0xFFFF;
+          lpGdt[index].baseMiddle = (base >> 16) & 0xFF;
+          lpGdt[index].baseHigh = (base >> 24) & 0xFF;
+          lpGdt[index].access = 0x89; // Present, TSS
+          lpGdt[index].granularity = 0x00;
 
-          GdtEntry* upper = &sGdt[index + 1];
+          GdtEntry* upper = &lpGdt[index + 1];
           std::memset(upper, 0, sizeof(GdtEntry));
           upper->limitLow = (base >> 32) & 0xFFFF;
           upper->baseLow = (base >> 48) & 0xFFFF;
@@ -109,41 +114,62 @@ namespace cpu
      static NO_ASAN void SetIdtEntry(std::size_t index, std::uintptr_t handler, std::uint16_t selector,
                                      std::uint8_t ist, std::uint8_t typeAttr)
      {
-          sIdt[index].offsetLow = handler & 0xFFFF;
-          sIdt[index].offsetMiddle = (handler >> 16) & 0xFFFF;
-          sIdt[index].offsetHigh = (handler >> 32) & 0xFFFFFFFF;
-          sIdt[index].selector = selector;
-          sIdt[index].ist = ist;
-          sIdt[index].typeAttr = typeAttr;
-          sIdt[index].reserved = 0;
-          _mm_clflush(&sIdt[index]);
+          lpIdt[index].offsetLow = handler & 0xFFFF;
+          lpIdt[index].offsetMiddle = (handler >> 16) & 0xFFFF;
+          lpIdt[index].offsetHigh = (handler >> 32) & 0xFFFFFFFF;
+          lpIdt[index].selector = selector;
+          lpIdt[index].ist = ist;
+          lpIdt[index].typeAttr = typeAttr;
+          lpIdt[index].reserved = 0;
+          _mm_clflush(&lpIdt[index]);
      }
 
      using InterruptRoutine = void (*)();
 
      extern "C" NO_ASAN InterruptRoutine KiInterruptVectorTable[256];
      extern "C" NO_ASAN void LoadTaskRegister(std::uint16_t selector);
+     void KeProtect(void (*protectionFunction)(std::uintptr_t address, bool isCode))
+     {
+          if (protectionFunction == nullptr) return;
+          protectionFunction(reinterpret_cast<std::uintptr_t>(lpGdt), false);
+          protectionFunction(reinterpret_cast<std::uintptr_t>(lpIdt), false);
+          protectionFunction(reinterpret_cast<std::uintptr_t>(KiInterruptVectorTable), false);
+          for (auto i : KiInterruptVectorTable)
+               protectionFunction(reinterpret_cast<std::uintptr_t>(i), true);
+     }
 
-     NO_ASAN void Initialise()
+     NO_ASAN void Initialise(std::uintptr_t (*lpPages)[2])
      {
           operations::DisableInterrupts();
 
-          std::memset(sGdt, 0, sizeof(sGdt));
-          std::memset(&sTss, 0, sizeof(sTss));
-          std::memset(sIdt, 0, sizeof(sIdt));
+          if (lpPages != nullptr)
+          {
+               auto& pages = *lpPages;
+               const auto gdtPage = pages[0];
+               auto tssPage = gdtPage + sizeof(cpu::GdtEntry[8]);
+               auto idtPage = pages[1];
 
-          SetGdtEntry(0, 0, 0, 0, 0);             // Null descriptor
-          SetGdtEntry(1, 0, 0xFFFFF, 0x9A, 0xA0); // Kernel code (64-bit)
-          SetGdtEntry(2, 0, 0xFFFFF, 0x92, 0xC0); // Kernel data
-          SetGdtEntry(3, 0, 0xFFFFF, 0xFA, 0xA0); // User code (64-bit)
-          SetGdtEntry(4, 0, 0xFFFFF, 0xF2, 0xC0); // User data
+               lpGdt = new (reinterpret_cast<void*>(gdtPage + 0xffff'8000'0000'0000)) cpu::GdtEntry[8];
+               lpTss = new (reinterpret_cast<void*>(tssPage + 0xffff'8000'0000'0000)) cpu::Tss64;
+               lpIdt = new (reinterpret_cast<void*>(idtPage + 0xffff'8000'0000'0000)) cpu::IdtEntry[256];
 
-          sTss.iomapBase = sizeof(Tss64);
-          SetTssEntry(5, reinterpret_cast<std::uintptr_t>(&sTss));
+               std::memset(lpGdt, 0, sizeof(cpu::GdtEntry[8]));
+               std::memset(lpTss, 0, sizeof(cpu::Tss64));
+               std::memset(lpIdt, 0, sizeof(cpu::IdtEntry[256]));
 
-          Gdtr gdtr{};
-          gdtr.limit = sizeof(sGdt) - 1;
-          gdtr.base = reinterpret_cast<std::uintptr_t>(&sGdt);
+               SetGdtEntry(0, 0, 0, 0, 0);             // Null descriptor
+               SetGdtEntry(1, 0, 0xFFFFF, 0x9A, 0xA0); // Kernel code (64-bit)
+               SetGdtEntry(2, 0, 0xFFFFF, 0x92, 0xC0); // Kernel data (64-bit)
+               SetGdtEntry(3, 0, 0xFFFFF, 0x9A, 0xA0); // Kernel code (32-bit)
+               SetGdtEntry(4, 0, 0xFFFFF, 0x92, 0xC0); // Kernel data (32-bit)
+               SetGdtEntry(5, 0, 0xFFFFF, 0xFA, 0xA0); // User code (64-bit)
+               SetGdtEntry(6, 0, 0xFFFFF, 0xF2, 0xC0); // User data
+
+               lpTss->iomapBase = sizeof(Tss64);
+               SetTssEntry(7, reinterpret_cast<std::uintptr_t>(lpTss));
+          }
+
+          Gdtr gdtr{.limit = sizeof(cpu::GdtEntry[8]) - 1, .base = reinterpret_cast<std::uintptr_t>(lpGdt)};
 
 #ifdef COMPILER_MSVC
           _lgdt(&gdtr);
@@ -151,15 +177,11 @@ namespace cpu
           asm volatile("lgdt %0" : : "m"(gdtr));
 #endif
 
-          for (std::size_t i = 0; i < 256; ++i)
-          {
-               SetIdtEntry(i, reinterpret_cast<std::uintptr_t>(KiInterruptVectorTable[i]), 0x08, 0, 0x8E);
-          }
+          if (lpPages != nullptr)
+               for (std::size_t i = 0; i < 256; ++i)
+                    SetIdtEntry(i, reinterpret_cast<std::uintptr_t>(KiInterruptVectorTable[i]), 0x08, 0, 0x8E);
 
-          Idtr idtr{};
-          idtr.limit = sizeof(sIdt) - 1;
-          idtr.base = reinterpret_cast<std::uintptr_t>(&sIdt);
-          _mm_clflush(&idtr);
+          Idtr idtr{.limit = sizeof(cpu::IdtEntry[256]) - 1, .base = reinterpret_cast<std::uintptr_t>(lpIdt)};
 
 #ifdef COMPILER_MSVC
           __lidt(&idtr);
@@ -190,8 +212,6 @@ namespace cpu
                        : "ax");
 #endif
      }
-
-     std::uint32_t GetCurrentCpuId() { return 0; } // TODO: Implement
 } // namespace cpu
 
 #elifdef ARCH_X8632 // ^^^ x86-64 / x86-32 vvv
@@ -280,7 +300,7 @@ namespace cpu
           std::uint32_t base;
      };
 #pragma pack(pop)
-     static GdtEntry sGdt[6];
+     static GdtEntry sGdt[8];
      static Tss32 sTss;
      static IdtEntry sIdt[256];
 
@@ -372,9 +392,6 @@ namespace cpu
           asm volatile("ltr %w0" : : "r"(static_cast<std::uint16_t>(0)));
 #endif
      }
-
-     std::uint32_t GetCurrentCpuId() { return 0; }
-
 } // namespace cpu
 
 #elifdef ARCH_ARM64 // ^^^ x86-32 / ARM64 vvv
@@ -404,18 +421,6 @@ namespace cpu
           asm volatile("isb");
 #endif
      }
-
-     std::uint32_t GetCurrentCpuId()
-     {
-          std::uint64_t mpidr = 0;
-#ifdef COMPILER_MSVC
-          mpidr = ::_ReadStatusReg(ARM64_SYSREG(3, 0, 0, 0, 5));
-#else
-          asm volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-#endif
-          return static_cast<std::uint32_t>(mpidr & 0xFF);
-     }
-
 } // namespace cpu
 
 #else // ^^^ ARM64

@@ -110,6 +110,11 @@ namespace memory
           [[nodiscard]] std::size_t GetNodesAllocated() const { return _nodesAllocated; }
           [[nodiscard]] std::size_t GetNodesFreed() const { return _nodesFreed; }
           [[nodiscard]] std::size_t GetNodesInUse() const { return _nodesAllocated - _nodesFreed; }
+
+     private:
+          std::atomic<bool> _lock{false};
+          void AcquireLock() noexcept;
+          void ReleaseLock() noexcept;
      };
 
      struct VirtualMemoryStatistics
@@ -189,6 +194,11 @@ namespace memory
 
           void SetPageTableRoot(std::uintptr_t pageTableRoot) { _pageTableRoot = pageTableRoot; }
           [[nodiscard]] std::uintptr_t GetPageTableRoot() const { return _pageTableRoot; }
+
+     private:
+          std::atomic<bool> _lock{false};
+          void AcquireLock() noexcept;
+          void ReleaseLock() noexcept;
      };
 
      [[nodiscard]] std::uintptr_t KeGetPhysicalAddress(void* virtualAddress);

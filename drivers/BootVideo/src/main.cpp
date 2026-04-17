@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <numbers>
 
 #define DLL DLLEXPORT
 #include <BootVideo.h>
@@ -17,6 +18,32 @@
 #elifdef ARCH_ARM64
 #include <arm_neon.h>
 #endif
+
+#pragma pack(push, 1)
+struct BmpFileHeader
+{
+     std::uint16_t type;
+     std::uint32_t size;
+     std::uint16_t reserved1;
+     std::uint16_t reserved2;
+     std::uint32_t offBits;
+};
+
+struct BmpInfoHeader
+{
+     std::uint32_t size;
+     std::int32_t width;
+     std::int32_t height;
+     std::uint16_t planes;
+     std::uint16_t bitCount;
+     std::uint32_t compression;
+     std::uint32_t sizeImage;
+     std::int32_t xPelsPerMeter;
+     std::int32_t yPelsPerMeter;
+     std::uint32_t clrUsed;
+     std::uint32_t clrImportant;
+};
+#pragma pack(pop)
 
 template <typename T> [[nodiscard]] constexpr T VidMin(T a, T b) noexcept { return a < b ? a : b; }
 
@@ -67,6 +94,46 @@ template <typename T, typename Cmp> static void VidInsertionSort(T* first, T* la
 [[nodiscard]] static float VidRound(float x) noexcept
 {
      return (x >= 0.0f) ? VidFloor(x + 0.5f) : -VidFloor(-x + 0.5f);
+}
+
+[[nodiscard]] static float VidCos(float x) noexcept
+{
+     constexpr float kTwoPi = 2.0f * std::numbers::pi_v<float>;
+     constexpr float kPi = std::numbers::pi_v<float>;
+     x -= kTwoPi * VidFloor(x / kTwoPi);
+     if (x > kPi) x = kTwoPi - x;
+     const float x2 = x * x;
+     return 1.0f + (x2 * (-0.4999999963f +
+                          x2 * (0.0416666418f + x2 * (-0.0013888397f + x2 * (0.0000247609f + x2 * (-0.0000002605f))))));
+}
+[[nodiscard]] static float VidSin(float x) noexcept
+{
+     constexpr float kHalfPi = std::numbers::pi_v<float> / 2.0f;
+     return VidCos(x - kHalfPi);
+}
+
+[[nodiscard]] static float VidAtan2(float y, float x) noexcept
+{
+     constexpr float kPi = std::numbers::pi_v<float>;
+     constexpr float kHalfPi = 1.57079632f;
+     if (x == 0.0f) return (y > 0.0f) ? kHalfPi : (y < 0.0f) ? -kHalfPi : 0.0f;
+     const bool negX = x < 0.0f;
+     const bool negY = y < 0.0f;
+     float ay = VidFabs(y);
+     float ax = VidFabs(x);
+     bool swapped = false;
+     if (ay > ax)
+     {
+          VidSwap(ax, ay);
+          swapped = true;
+     }
+     const float t = ay / ax;
+     const float t2 = t * t;
+     float a = t * (0.99997726f + t2 * (-0.33262347f + t2 * (0.19354346f + t2 * (-0.11643287f + t2 * 0.05265332f))));
+     if (swapped) a = kHalfPi - a;
+     if (negX) a = kPi - a;
+     if (negY) a = -a;
+     return a;
 }
 
 [[nodiscard]] static float VidSqrt(float x) noexcept
@@ -172,10 +239,12 @@ enum class CmdType : std::uint8_t
      Rect,
      Pixel,
      Char,
+     Bitmap,
      Line,
      Ellipse,
      RoundedRect,
-     Triangle
+     Triangle,
+     Spinner
 };
 
 struct CmdClear
@@ -213,6 +282,23 @@ struct CmdTriangle
      std::int32_t x0, y0, x1, y1, x2, y2;
      std::uint32_t colour;
 };
+struct CmdBitmap
+{
+     std::uint32_t x, y;
+     const std::uint8_t* data;
+     std::uint32_t width, height, pitch;
+     std::uint8_t bytesPerPixel;
+     BitmapOrientation orientation;
+     bool bottomUp;
+};
+struct CmdSpinner
+{
+     std::uint32_t cx, cy;
+     std::uint32_t radius;
+     std::uint32_t colour;
+     std::uint32_t tick;
+     SpinnerStyle style;
+};
 
 struct DrawCommand
 {
@@ -227,6 +313,8 @@ struct DrawCommand
           CmdEllipse ellipse;
           CmdRoundedRect roundedRect;
           CmdTriangle triangle;
+          CmdBitmap bitmap;
+          CmdSpinner spinner;
      } data{};
 };
 
@@ -541,9 +629,9 @@ static void MsaaResolvePixel(std::uint32_t lx, std::uint32_t ly) noexcept
      const Rgb s10 = Unpack(g_msaa.pixels[((sy)*w) + (sx + 1)]);
      const Rgb s01 = Unpack(g_msaa.pixels[((sy + 1) * w) + (sx)]);
      const Rgb s11 = Unpack(g_msaa.pixels[((sy + 1) * w) + (sx + 1)]);
-     const Rgb avg = {.r=static_cast<std::uint8_t>((s00.r + s10.r + s01.r + s11.r) >> 2u),
-                      .g=static_cast<std::uint8_t>((s00.g + s10.g + s01.g + s11.g) >> 2u),
-                      .b=static_cast<std::uint8_t>((s00.b + s10.b + s01.b + s11.b) >> 2u)};
+     const Rgb avg = {.r = static_cast<std::uint8_t>((s00.r + s10.r + s01.r + s11.r) >> 2u),
+                      .g = static_cast<std::uint8_t>((s00.g + s10.g + s01.g + s11.g) >> 2u),
+                      .b = static_cast<std::uint8_t>((s00.b + s10.b + s01.b + s11.b) >> 2u)};
      g_buffer.framebuffer[(ly * g_buffer.scanlineSize) + lx] = Pack(avg);
 }
 
@@ -593,15 +681,6 @@ static Rect RasterisePixel(const CmdPixel& cmd) noexcept
      MsaaResolvePixel(cmd.x, cmd.y);
      return {.x0 = cmd.x, .y0 = cmd.y, .x1 = cmd.x + 1, .y1 = cmd.y + 1};
 }
-
-// ---------------------------------------------------------------------------
-// Char — SDF coverage blend, written directly into the backbuffer.
-//
-// The SDF value for each texel is mapped to a coverage in [0, 1] via a
-// linear ramp over [kSdfLo, kSdfHi].  The coverage is used to alpha-blend
-// the glyph colour over whatever is already in the backbuffer, giving smooth
-// sub-pixel edges even on the 1× bitmap font.
-// ---------------------------------------------------------------------------
 
 static constexpr float kSdfLo = -0.08f;
 static constexpr float kSdfHi = 0.08f;
@@ -811,7 +890,6 @@ static Rect RasteriseRoundedRect(const CmdRoundedRect& cmd) noexcept
           MsaaResolvePixel(lx, ly);
      };
 
-     // Helper: blend one corner pixel.  cx/cy are the circle centre coords.
      const auto cornerPixel = [&](std::uint32_t lx, std::uint32_t ly, float ccx, float ccy)
      {
           const float dx = static_cast<float>(lx) + 0.5f - ccx;
@@ -878,7 +956,6 @@ static Rect RasteriseTriangle(const CmdTriangle& cmd) noexcept
 {
      if (g_buffer.framebuffer == nullptr) return {};
 
-     // Ensure CCW winding so inward normals point consistently.
      std::int32_t ax = cmd.x0;
      std::int32_t ay = cmd.y0;
      std::int32_t bx = cmd.x1;
@@ -915,7 +992,6 @@ static Rect RasteriseTriangle(const CmdTriangle& cmd) noexcept
 
      if (abLen == 0.0f || bcLen == 0.0f || caLen == 0.0f) return {};
 
-     // Inward unit normals.
      const float abNx = -abDy / abLen;
      const float abNy = abDx / abLen;
      const float bcNx = -bcDy / bcLen;
@@ -964,6 +1040,203 @@ static Rect RasteriseTriangle(const CmdTriangle& cmd) noexcept
      return {.x0 = bx0, .y0 = by0, .x1 = bx1, .y1 = by1};
 }
 
+static Rect RasteriseBitmap(const CmdBitmap& cmd) noexcept
+{
+     if (g_buffer.framebuffer == nullptr) return {};
+
+     const std::uint32_t mw = g_msaa.msaaW;
+
+     for (std::uint32_t row = 0; row < cmd.height; ++row)
+     {
+          const std::uint32_t srcRow = cmd.bottomUp ? (cmd.height - 1u - row) : row;
+          const std::uint8_t* srcLine = cmd.data + (static_cast<std::size_t>(srcRow) * cmd.pitch);
+
+          for (std::uint32_t col = 0; col < cmd.width; ++col)
+          {
+               std::uint32_t lx{};
+               std::uint32_t ly{};
+
+               switch (cmd.orientation)
+               {
+               case BitmapOrientation::o90:
+                    lx = cmd.x + (cmd.height - 1u - row);
+                    ly = cmd.y + col;
+                    break;
+               case BitmapOrientation::o180:
+                    lx = cmd.x + (cmd.width - 1u - col);
+                    ly = cmd.y + (cmd.height - 1u - row);
+                    break;
+               case BitmapOrientation::o270:
+                    lx = cmd.x + row;
+                    ly = cmd.y + (cmd.width - 1u - col);
+                    break;
+               default:
+                    lx = cmd.x + col;
+                    ly = cmd.y + row;
+                    break;
+               }
+
+               if (lx >= g_buffer.width || ly >= g_buffer.height) continue;
+
+               const std::uint8_t* px = srcLine + (static_cast<std::size_t>(col) * cmd.bytesPerPixel);
+               const std::uint32_t colour = (static_cast<std::uint32_t>(px[2]) << 16u) |
+                                            (static_cast<std::uint32_t>(px[1]) << 8u) |
+                                            static_cast<std::uint32_t>(px[0]);
+
+               const std::uint32_t sx = lx * 2u;
+               const std::uint32_t sy = ly * 2u;
+               g_msaa.pixels[(sy * mw) + sx] = colour;
+               g_msaa.pixels[(sy * mw) + (sx + 1u)] = colour;
+               g_msaa.pixels[((sy + 1u) * mw) + sx] = colour;
+               g_msaa.pixels[((sy + 1u) * mw) + (sx + 1u)] = colour;
+               MsaaResolvePixel(lx, ly);
+          }
+     }
+
+     const bool swapDimensions =
+         cmd.orientation == BitmapOrientation::o90 || cmd.orientation == BitmapOrientation::o270;
+     const std::uint32_t footW = swapDimensions ? cmd.height : cmd.width;
+     const std::uint32_t footH = swapDimensions ? cmd.width : cmd.height;
+     return {.x0 = cmd.x,
+             .y0 = cmd.y,
+             .x1 = VidMin(cmd.x + footW, g_buffer.width),
+             .y1 = VidMin(cmd.y + footH, g_buffer.height)};
+}
+static Rect RasteriseSpinner(const CmdSpinner& cmd) noexcept
+{
+     if (g_buffer.framebuffer == nullptr) return {};
+
+     const std::uint32_t mw = g_msaa.msaaW;
+     const float cx = static_cast<float>(cmd.cx);
+     const float cy = static_cast<float>(cmd.cy);
+     const float r = static_cast<float>(cmd.radius);
+     const Rgb tint = Unpack(cmd.colour != 0u ? cmd.colour : 0xFFFFFFu);
+
+     const std::uint32_t bx0 = (cmd.cx > cmd.radius + 2u) ? cmd.cx - cmd.radius - 2u : 0u;
+     const std::uint32_t by0 = (cmd.cy > cmd.radius + 2u) ? cmd.cy - cmd.radius - 2u : 0u;
+     const std::uint32_t bx1 = VidMin(cmd.cx + cmd.radius + 3u, g_buffer.width);
+     const std::uint32_t by1 = VidMin(cmd.cy + cmd.radius + 3u, g_buffer.height);
+
+     for (std::uint32_t ly = by0; ly < by1; ++ly)
+          for (std::uint32_t lx = bx0; lx < bx1; ++lx) MsaaSeedPixel(lx, ly);
+
+     if (cmd.style == SpinnerStyle::Win10Dots)
+     {
+          constexpr std::uint32_t kN = 6u;
+          constexpr float kTwoPi = 6.28318530f;
+          constexpr float kStep = kTwoPi / static_cast<float>(kN);
+          constexpr float kAlpha[kN] = {1.0f, 0.85f, 0.75f, 0.65f, 0.55f, 0.45f};
+
+          constexpr float kEase = 0.45f;
+
+          const float orbitR = r * 0.70f;
+          const float dotR = r * 0.18f;
+          const float phase = (static_cast<float>(cmd.tick % 60u) / 60.0f) * kTwoPi;
+
+          for (std::uint32_t d = 0u; d < kN; ++d)
+          {
+               const float raw = phase - (static_cast<float>(d) * kStep);
+
+               const float eased = raw - (kEase * VidSin(raw));
+               constexpr float kHalfPi = std::numbers::pi_v<float> / 2.0f;
+
+               const float dotCx = cx + (orbitR * VidCos(eased - kHalfPi));
+               const float dotCy = cy + (orbitR * VidSin(eased - kHalfPi));
+               const float alpha = kAlpha[d];
+               constexpr float kEdge = 0.7f;
+               const auto px0 = static_cast<std::uint32_t>(VidMax(0.0f, VidFloor(dotCx - dotR - 1.0f)));
+               const auto py0 = static_cast<std::uint32_t>(VidMax(0.0f, VidFloor(dotCy - dotR - 1.0f)));
+               const auto px1 = VidMin(static_cast<std::uint32_t>(VidFloor(dotCx + dotR + 2.0f)), g_buffer.width);
+               const auto py1 = VidMin(static_cast<std::uint32_t>(VidFloor(dotCy + dotR + 2.0f)), g_buffer.height);
+
+               for (std::uint32_t ly = py0; ly < py1; ++ly)
+               {
+                    for (std::uint32_t lx = px0; lx < px1; ++lx)
+                    {
+                         const float dx = static_cast<float>(lx) + 0.5f - dotCx;
+                         const float dy = static_cast<float>(ly) + 0.5f - dotCy;
+                         const float sdf = VidSqrt((dx * dx) + (dy * dy)) - dotR;
+                         if (sdf > kEdge) continue;
+
+                         const float coverage = (sdf < -kEdge) ? 1.0f : 1.0f - ((sdf + kEdge) / (2.0f * kEdge));
+                         const float blendT = coverage * alpha;
+                         if (blendT <= 0.0f) continue;
+
+                         const std::uint32_t sx = lx * 2u;
+                         const std::uint32_t sy = ly * 2u;
+                         auto acc = [&](std::uint32_t six, std::uint32_t siy)
+                         {
+                              std::uint32_t& slot = g_msaa.pixels[(siy * mw) + six];
+                              slot = Blend(slot, Pack(tint), blendT);
+                         };
+                         acc(sx, sy);
+                         acc(sx + 1u, sy);
+                         acc(sx, sy + 1u);
+                         acc(sx + 1u, sy + 1u);
+                    }
+               }
+          }
+     }
+     else
+     {
+          constexpr float kTwoPi = 6.28318530f;
+          constexpr float kArcSpan = kTwoPi * 0.75f; // 270°
+          const float innerR = r * 0.58f;
+          constexpr float kEdge = 0.8f;
+          constexpr float kHalfPi = std::numbers::pi_v<float> / 2.0f;
+          const float leadAngle =
+              ((static_cast<float>(cmd.tick % 90u) / 90.0f) * (2.0f * std::numbers::pi_v<float>)) - kHalfPi;
+
+          for (std::uint32_t ly = by0; ly < by1; ++ly)
+          {
+               for (std::uint32_t lx = bx0; lx < bx1; ++lx)
+               {
+                    if (lx >= g_buffer.width || ly >= g_buffer.height) continue;
+
+                    const float dx = static_cast<float>(lx) + 0.5f - cx;
+                    const float dy = static_cast<float>(ly) + 0.5f - cy;
+                    const float dist = VidSqrt((dx * dx) + (dy * dy));
+
+                    const float ringSdf = VidMax(dist - r, innerR - dist);
+                    if (ringSdf > kEdge) continue;
+
+                    const float pixAngle = VidAtan2(dy, dx);
+
+                    float rel = leadAngle - pixAngle;
+                    if (rel < 0.0f) rel += kTwoPi;
+                    if (rel >= kTwoPi) rel -= kTwoPi;
+
+                    if (rel > kArcSpan) continue;
+
+                    const float t = rel / kArcSpan;
+                    const float alpha = ((1.0f - t) * 0.95f) + 0.05f;
+
+                    const float radialCov = (ringSdf < -kEdge) ? 1.0f : 1.0f - ((ringSdf + kEdge) / (2.0f * kEdge));
+                    const float blendT = radialCov * alpha;
+                    if (blendT <= 0.0f) continue;
+
+                    const std::uint32_t sx = lx * 2u;
+                    const std::uint32_t sy = ly * 2u;
+                    auto acc = [&](std::uint32_t six, std::uint32_t siy)
+                    {
+                         std::uint32_t& slot = g_msaa.pixels[(siy * mw) + six];
+                         slot = Blend(slot, Pack(tint), blendT);
+                    };
+                    acc(sx, sy);
+                    acc(sx + 1u, sy);
+                    acc(sx, sy + 1u);
+                    acc(sx + 1u, sy + 1u);
+               }
+          }
+     }
+
+     for (std::uint32_t ly = by0; ly < by1; ++ly)
+          for (std::uint32_t lx = bx0; lx < bx1; ++lx)
+               if (lx < g_buffer.width && ly < g_buffer.height) MsaaResolvePixel(lx, ly);
+
+     return {.x0 = bx0, .y0 = by0, .x1 = bx1, .y1 = by1};
+}
+
 DLLEXPORT void VidInitialise(VdiFrameBuffer buffer, void* (*allocator)(std::size_t))
 {
      g_buffer.framebuffer = buffer.optionalBackbuffer != nullptr ? buffer.optionalBackbuffer : buffer.framebuffer;
@@ -992,7 +1265,7 @@ DLLEXPORT void VidInitialise(VdiFrameBuffer buffer, void* (*allocator)(std::size
 
      DrawCommand cmd;
      cmd.type = CmdType::Clear;
-     cmd.data.clear = {.colour = 0x10101a};
+     cmd.data.clear = {.colour = 0};
      g_mesh.Push(cmd);
 }
 
@@ -1064,10 +1337,6 @@ DLLEXPORT void VidDrawTriangle(std::int32_t x0, std::int32_t y0, std::int32_t x1
      g_mesh.Push(cmd);
 }
 
-// ---------------------------------------------------------------------------
-// Stage 2 — Present: rasterise mesh → backbuffer, build dirty list
-// ---------------------------------------------------------------------------
-
 DLLEXPORT void VidPresent()
 {
      const DrawCommand* const cmdBegin = g_mesh.commands;
@@ -1086,6 +1355,8 @@ DLLEXPORT void VidPresent()
           case CmdType::Ellipse: touched = RasteriseEllipse(cmd.data.ellipse); break;
           case CmdType::RoundedRect: touched = RasteriseRoundedRect(cmd.data.roundedRect); break;
           case CmdType::Triangle: touched = RasteriseTriangle(cmd.data.triangle); break;
+          case CmdType::Bitmap: touched = RasteriseBitmap(cmd.data.bitmap); break;
+          case CmdType::Spinner: touched = RasteriseSpinner(cmd.data.spinner); break;
           }
           g_dirty.Add(touched, g_buffer.width, g_buffer.height);
      }
@@ -1146,4 +1417,47 @@ DLLEXPORT void VidExchangeBuffers()
 {
      VidPresent();
      VidExchange();
+}
+DLLEXPORT void VidDrawBitmap(std::uint32_t x, std::uint32_t y, const void* bmpData, BitmapOrientation orientation,
+                             std::size_t bmpSize)
+{
+     if (bmpData == nullptr) return;
+     if (bmpSize != 0 && bmpSize < sizeof(BmpFileHeader) + sizeof(BmpInfoHeader)) return;
+
+     const auto* base = static_cast<const std::uint8_t*>(bmpData);
+     const auto* fileHdr = reinterpret_cast<const BmpFileHeader*>(base);
+     const auto* infoHdr = reinterpret_cast<const BmpInfoHeader*>(base + sizeof(BmpFileHeader));
+
+     if (fileHdr->type != 0x4D42u) return;
+     if (infoHdr->compression != 0u) return;
+     if (infoHdr->bitCount != 24u && infoHdr->bitCount != 32u) return;
+     if (bmpSize != 0 && fileHdr->offBits >= bmpSize) return;
+
+     const std::uint32_t width = static_cast<std::uint32_t>(infoHdr->width);
+     const bool bottomUp = infoHdr->height > 0;
+     const std::uint32_t height =
+         bottomUp ? static_cast<std::uint32_t>(infoHdr->height) : static_cast<std::uint32_t>(-infoHdr->height);
+     const std::uint32_t bytesPerPixel = infoHdr->bitCount / 8u;
+     const std::uint32_t pitch = (width * bytesPerPixel + 3u) & ~3u;
+
+     DrawCommand cmd;
+     cmd.type = CmdType::Bitmap;
+     cmd.data.bitmap = {.x = x,
+                        .y = y,
+                        .data = base + fileHdr->offBits,
+                        .width = width,
+                        .height = height,
+                        .pitch = pitch,
+                        .bytesPerPixel = static_cast<std::uint8_t>(bytesPerPixel),
+                        .orientation = orientation,
+                        .bottomUp = bottomUp};
+     g_mesh.Push(cmd);
+}
+DLLEXPORT void VidDrawSpinner(std::uint32_t cx, std::uint32_t cy, std::uint32_t radius, std::uint32_t colour,
+                              std::uint32_t tick, SpinnerStyle style)
+{
+     DrawCommand cmd;
+     cmd.type = CmdType::Spinner;
+     cmd.data.spinner = {.cx = cx, .cy = cy, .radius = radius, .colour = colour, .tick = tick, .style = style};
+     g_mesh.Push(cmd);
 }

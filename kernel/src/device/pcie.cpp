@@ -63,6 +63,7 @@ static bool KiIsDeviceMultifunction(std::uintptr_t base, std::uint8_t bus, std::
      auto* hdr = reinterpret_cast<volatile PCIHeader*>(address);
      return (hdr->headerType & 0x80) != 0;
 }
+extern volatile std::uint32_t* g_lapic;
 
 bool KiEnableMSI(volatile PCIHeaderType0* hdr, std::uint8_t vector)
 {
@@ -83,7 +84,7 @@ bool KiEnableMSI(volatile PCIHeaderType0* hdr, std::uint8_t vector)
 
                const bool is64 = (msi[1] >> 16) & 1;
 
-               msi[2] = 0xFEE00000;
+               msi[2] = reinterpret_cast<std::uintptr_t>(g_lapic) - 0xffff'8000'0000'0000;
                msi[3] = vector;
 
                if (is64) msi[4] = vector;
@@ -442,7 +443,7 @@ void KeInitialisePCIE()
                mapping.size = 0x1000;
                mapping.writable = true;
                mapping.userAccessible = false;
-               mapping.cacheDisable = true;
+               mapping.cachePolicy = memory::CachePolicy::Uncacheable;
                mapping.executable = false;
 
                auto ptAllocator = [](std::size_t) -> void*
@@ -472,8 +473,6 @@ void KeInitialisePCIE()
      const auto end = KeReadHighResolutionTimer();
      const auto duration = end - start;
      debugging::DbgWrite(u8"Finished scanning in {} ms\r\n", duration * 1000uz / KeReadHighResolutionTimerFrequency());
-
-     debugging::DbgWrite(u8"Finished scanning the PCI-e bus\r\n");
 }
 
 std::uintptr_t PciConfigAddress(std::uint8_t bus, std::uint8_t device, std::uint8_t func, std::uint8_t reg)

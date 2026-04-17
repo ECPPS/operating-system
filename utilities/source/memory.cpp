@@ -20,7 +20,7 @@ NO_ASAN extern "C" void* __cdecl memset(_Out_ void* _Dst, _In_ int _Val, _In_ si
      auto* dst = static_cast<std::byte*>(_Dst);
 
      const std::byte byteVal = static_cast<std::byte>(_Val);
-     const std::uint32_t val32 = _Val * 0x01010101;
+     const std::uint32_t val32 = static_cast<std::uint32_t>(_Val) * 0x01010101;
 
      while (((reinterpret_cast<std::uintptr_t>(dst) & 15) != 0) && _Size > 0)
      {
@@ -176,8 +176,6 @@ NO_ASAN extern "C" void* __cdecl memcpy(_Out_writes_bytes_all_(_Size) void* _Dst
      }
 #endif
 
-     for (; i + 4 <= _Size; i += 4)
-          *reinterpret_cast<std::uint32_t*>(dst + i) = *reinterpret_cast<const std::uint32_t*>(src + i);
      for (; i < _Size; ++i) dst[i] = src[i];
 
      return _Dst;

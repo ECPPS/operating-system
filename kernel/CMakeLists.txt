@@ -6,6 +6,7 @@ add_executable(Kernel
     src/memory/vallocator.cpp
     src/memory/kheap.cpp
     src/cpu/interrupts.cpp
+    src/cpu/mp.cpp
     src/dbg/bugcheck.cpp
     src/crtstub.cpp
     src/perf/sysmetrics.cpp
@@ -16,6 +17,7 @@ add_executable(Kernel
     src/device/pcie.cpp
     src/device/usb.cpp
     src/device/dma.cpp
+    src/device/dpc.cpp
 )
 set(KERNEL_IMAGE "kernel")
 
@@ -70,14 +72,13 @@ if(MSVC)
     
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(Kernel PRIVATE
-        -fno-sanitize=all
         -ffreestanding
-        -fno-stack-protector
-        -fno-stack-check
         -fshort-wchar
         -fno-exceptions
         -fno-rtti
         -fno-asynchronous-unwind-tables
+        -fno-omit-frame-pointer
+        -fsanitize=undefined -fsanitize=function -fsanitize=cfi -fstack-protector -fstack-protector-all -flto -fvisibility=hidden
         -D_GLIBCXX_DEBUG=0
         -D_GLIBCXX_ASSERTIONS=0
         -D_LIBCPP_ENABLE_ASSERTIONS=0
@@ -102,11 +103,12 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_link_options(Kernel PRIVATE
         -nostdlib
         -Wl,-dll
+        -flto
+        -fsanitize=cfi
         -shared
         -Wl,/subsystem:NATIVE
         -Wl,/ENTRY:KiStartup
-        -Wl,/guard:no
-        -Wl,/CETCOMPAT:NO
+        -Wl,/guard:cf
         -Wl,/NODEFAULTLIB
     )
 

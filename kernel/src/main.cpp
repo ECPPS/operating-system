@@ -1,10 +1,14 @@
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include "BootVideo.h"
 #include "cpu/interrupts.h"
+#include "cpu/mp.h"
 #include "dbg/kasan.h"
 #include "device/device.h"
+#include "device/dpc.h"
 #include "device/pcie.h"
 #include "kinit.h"
 #include "memory/kheap.h"
@@ -13,6 +17,8 @@
 #include "object/object.h"
 #include "process/process.h"
 #include "process/taskScheduler.h"
+#include "process/thread.h"
+#include "sync/locks.h"
 #include "utils/PE.h"
 #include "utils/arch.h"
 #include "utils/cpu.h"
@@ -101,69 +107,41 @@ static void Format4(char* out, std::uint32_t v)
      out[3] = char('0' + (v % 10));
 }
 
+static const char* g_bootStatus = "Booting...";
+static std::atomic<std::uint64_t> g_idleCounter{};
+
 void KiIdleLoop()
 {
-     std::uint32_t screenWidth{};
-     std::uint32_t screenHeight{};
-     VidGetDimensions(screenWidth, screenHeight);
+     if (process::KeCurrentCpu()->isBSP)
+     {
+          while (true)
+          {
+               VidExchangeBuffers();
 
-     std::size_t lastSeconds{};
+               operations::EnableInterrupts();
+               operations::Yield();
+               operations::Yield();
+               operations::DisableInterrupts();
+
+               device::KeFlushQueuedDpcs();
+
+               operations::EnableInterrupts();
+               operations::Halt();
+          }
+     }
+     g_idleCounter.fetch_add(1, std::memory_order::acq_rel);
 
      while (true)
      {
-          VidExchangeBuffers();
-
           operations::EnableInterrupts();
           operations::Yield();
           operations::Yield();
           operations::DisableInterrupts();
 
-          // TODO: DPC stuff
+          device::KeFlushQueuedDpcs();
 
           operations::EnableInterrupts();
           operations::Halt();
-
-          const auto unixTime = KeCurrentSystemTime() / 1'000;
-          if (unixTime == lastSeconds) continue;
-          lastSeconds = unixTime;
-
-          const auto dt = UnixToDateTime(unixTime);
-
-          std::array<char, 32> buffer{};
-
-          buffer[0] = char('0' + (dt.hour / 10));
-          buffer[1] = char('0' + (dt.hour % 10));
-          buffer[2] = ':';
-
-          buffer[3] = char('0' + (dt.min / 10));
-          buffer[4] = char('0' + (dt.min % 10));
-          buffer[5] = ':';
-
-          buffer[6] = char('0' + (dt.sec / 10));
-          buffer[7] = char('0' + (dt.sec % 10));
-          buffer[8] = ' ';
-
-          buffer[9] = char('0' + (dt.day / 10));
-          buffer[10] = char('0' + (dt.day % 10));
-          buffer[11] = '.';
-
-          buffer[12] = char('0' + (dt.month / 10));
-          buffer[13] = char('0' + (dt.month % 10));
-          buffer[14] = '.';
-
-          Format4(&buffer[15], dt.year);
-          buffer[19] = '\0';
-
-          constexpr int charW = 2 * 8;
-          constexpr int charH = 2 * 6;
-
-          const int width = 20 * charW;
-          const int x = static_cast<int>(screenWidth - width);
-          const int y = (5 + charH) / 2;
-
-          VidDrawRoundedRect(10, 5, screenWidth - 20, charH + 8, 15, 0xfefefe);
-
-          for (int i = 0; buffer[i]; i++) VidDrawChar(x + (i * charW), y, buffer[i], 0, 2);
      }
 }
 void Error(std::uint32_t* buffer, arch::LoaderParameterBlock* param)
@@ -272,9 +250,9 @@ static NO_ASAN void KiMarkKernelImage()
      KiMarkBootVideoImage();
 }
 
-void NO_ASAN KiInitialise(arch::LoaderParameterBlock* param)
+std::uintptr_t NO_ASAN KiInitialise(arch::LoaderParameterBlock* param)
 {
-     std::uint32_t* buffer = reinterpret_cast<std::uint32_t*>(param->framebuffer.physicalStart);
+     std::uint32_t* buffer = reinterpret_cast<std::uint32_t*>(param->framebuffer.physicalStart + 0xffff'8000'0000'0000);
 
      g_bootCycles = operations::ReadCurrentCycles();
      g_loaderBlock = param;
@@ -285,19 +263,21 @@ void NO_ASAN KiInitialise(arch::LoaderParameterBlock* param)
      g_imageBase = param->kernelVirtualBase;
      g_imageSize = param->kernelSize;
 
-     cpu::Initialise();
+     std::uintptr_t mpPage = ~0;
 
      auto status = memory::physicalAllocator.Initialise(param->memoryDescriptors, param->kernelPhysicalBase,
-                                                        0xffff'8000'0000'0000, param->kernelSize);
+                                                        0xffff'8000'0000'0000, param->kernelSize, mpPage);
      if (!status) Error(buffer, param);
+     const auto gdtPage = memory::physicalAllocator.AllocatePage(memory::PFNUse::KernelHeap);
+     const auto idtPage = memory::physicalAllocator.AllocatePage(memory::PFNUse::KernelHeap);
+
+     std::uintptr_t pages[2] = {gdtPage, idtPage};
+     cpu::Initialise(&pages);
 
      g_kernelProcess = new (g_kernelProcessStorage) kernel::ProcessControlBlock(0, "System", 0xffff'e000'0000'0000);
      g_kernelProcess->SetState(kernel::ProcessState::Running);
      g_kernelProcess->SetPriority(kernel::ProcessPriority::Realtime);
      g_kernelProcess->SetPageTableBase(memory::paging::GetCurrentPageTable());
-
-     for (std::size_t i = 0; i < param->framebuffer.height; i++)
-          std::uninitialized_fill_n(buffer + (i * framebuffer.scanlineSize), framebuffer.scanlineSize, 0x11);
 
      memory::virtualOffset = 0xffff'8000'0000'0000;
 
@@ -311,6 +291,21 @@ void NO_ASAN KiInitialise(arch::LoaderParameterBlock* param)
 
      KeInitialiseCpu(param->acpiPhysical);
      KeRemoveLeftoverMappings();
+     cpu::KeProtect(
+         [](std::uintptr_t address, bool isCode) -> void
+         {
+              memory::paging::ProtectPage(memory::paging::GetCurrentPageTable(), address, false, false, isCode,
+                                          [](std::size_t) -> void*
+                                          {
+                                               std::uintptr_t page =
+                                                   memory::physicalAllocator.AllocatePage(memory::PFNUse::PageTable);
+                                               if (page == ~0uz) return nullptr;
+                                               return reinterpret_cast<void*>(page + memory::virtualOffset);
+                                          });
+              memory::paging::InvalidatePage(address);
+         });
+
+     return mpPage;
 }
 void PrintVadEntryCallback(const memory::VADEntry& entry)
 {
@@ -622,7 +617,7 @@ bool SerialInterruptHandler([[maybe_unused]] cpu::IInterruptFrame& frame, void* 
 }
 #endif
 
-static constexpr std::uint32_t kColBackground = 0x10101a;
+static constexpr std::uint32_t kColBackground = 0;
 static constexpr std::uint32_t kColDefault = 0xd4d4d4;
 static constexpr std::uint32_t kColTreeLine = 0x4a4a6a;
 static constexpr std::uint32_t kColBracket = 0x608060;    // [TypeName]
@@ -676,9 +671,7 @@ static void VtPutStr(VidTextCtx& ctx, const char* s, std::uint32_t colour) noexc
 }
 
 static void VtPutStr8(VidTextCtx& ctx, const char8_t* s, std::uint32_t colour) noexcept
-{
-     VtPutStr(ctx, reinterpret_cast<const char*>(s), colour);
-}
+{ VtPutStr(ctx, reinterpret_cast<const char*>(s), colour); }
 
 static void VtPutU64(VidTextCtx& ctx, std::uint64_t v, std::uint32_t colour) noexcept
 {
@@ -944,20 +937,173 @@ void VidDumpObjectTree(const object::ObjectHeader* root) noexcept
      VidExchangeBuffers();
 }
 
+// PCIe, MP,
+static constexpr std::size_t initialisationSteps = 6;
+static std::size_t currentStep = 0;
+static std::array<const char*, initialisationSteps> initStepNames = {"CPU", "PCIe", "MP", "MP lock", "Serial", "Done"};
+
+static void RedrawBar()
+{
+     std::uint32_t screenWidth{};
+     std::uint32_t screenHeight{};
+     VidGetDimensions(screenWidth, screenHeight);
+
+     constexpr std::uint32_t colEmpty = 0x666680;
+     constexpr std::uint32_t colFilled = 0x4ec994;
+
+     const std::uint32_t barX = screenWidth / 4;
+     const std::uint32_t barY = screenHeight * 3 / 4;
+     const std::uint32_t barWidth = screenWidth / 2;
+     const std::uint32_t barHeight = 20;
+     const std::uint32_t stepWidth = barWidth / initialisationSteps;
+
+     for (std::uint32_t i = 0; i < initialisationSteps; i++)
+     {
+          const std::uint32_t x = barX + (i * stepWidth);
+          const std::uint32_t colour = (i < currentStep) ? colFilled : colEmpty;
+          VidDrawRect(x, barY, stepWidth - 2, barHeight, colour);
+     }
+
+     if (currentStep <= initialisationSteps)
+     {
+          constexpr auto maxStepNameLength = 16;
+          const char* stepName = initStepNames[currentStep - 1];
+          if (stepName == nullptr) stepName = "Unknown Step";
+          std::uint32_t textWidth = 16 * static_cast<std::uint32_t>(std::strlen(stepName));
+          std::uint32_t textX = barX + ((barWidth - textWidth) / 2);
+          std::uint32_t textY = barY - 30;
+          VidDrawRect(barX + ((barWidth - (maxStepNameLength * 16)) / 2) - 4, textY - 4, maxStepNameLength * 16, 24,
+                      kColBackground);
+          for (std::size_t i = 0; stepName[i]; i++) VidDrawChar(textX + (i * 16), textY, stepName[i], colFilled, 2);
+     }
+
+     VidExchangeBuffers();
+}
+static void UpdateProgressBar()
+{
+     currentStep++;
+     RedrawBar();
+}
+
+// ReadMsr, WriteMsr, ReadCR, WriteCR
+static inline std::uint64_t ReadMsr(std::uint32_t msr)
+{
+     std::uint32_t low{};
+     std::uint32_t high{};
+#ifdef COMPILER_MSVC
+     low = __readmsr(msr);
+     high = __readmsr(msr + 1);
+#elif defined(COMPILER_CLANG)
+     asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(msr));
+#endif
+     return (static_cast<std::uint64_t>(high) << 32) | low;
+}
+static inline void WriteMsr(std::uint32_t msr, std::uint64_t value)
+{
+     std::uint32_t low = static_cast<std::uint32_t>(value & 0xFFFFFFFF);
+     std::uint32_t high = static_cast<std::uint32_t>(value >> 32);
+#ifdef COMPILER_MSVC
+     __writemsr(msr, low);
+     __writemsr(msr + 1, high);
+#elif defined(COMPILER_CLANG)
+     asm volatile("wrmsr" : : "c"(msr), "a"(low), "d"(high));
+#endif
+}
+static inline std::uint64_t ReadCR(std::uint32_t cr)
+{
+     std::uint64_t value{};
+#ifdef COMPILER_MSVC
+     switch (cr)
+     {
+     case 0: value = __readcr0(); break;
+     case 4: value = __readcr4(); break;
+     default: break;
+     }
+#elif defined(COMPILER_CLANG)
+     switch (cr)
+     {
+     case 0: asm volatile("mov %%cr0, %0" : "=r"(value)); break;
+     case 4: asm volatile("mov %%cr4, %0" : "=r"(value)); break;
+     default: break;
+     }
+#endif
+     return value;
+}
+static inline void WriteCR(std::uint32_t cr, std::uint64_t value)
+{
+#ifdef COMPILER_MSVC
+     switch (cr)
+     {
+     case 0: __writecr0(value); break;
+     case 4: __writecr4(value); break;
+     default: break;
+     }
+#elif defined(COMPILER_CLANG)
+     switch (cr)
+     {
+     case 0: asm volatile("mov %0, %%cr0" : : "r"(value)); break;
+     case 4: asm volatile("mov %0, %%cr4" : : "r"(value)); break;
+     default: break;
+     }
+#endif
+}
+
+static void KeEnableVMXOnCurrentProcessor()
+{
+     // IA32_VMX_PROC_CTLS: pin-based VM-execution controls
+     // IA32_VMX_PROC_CTLS2: secondary processor-based VM-execution controls (if allowed by IA32_VMX_PROC_CTLS)
+     // IA32_VMX_ENTRY_CTLS: VM-entry controls
+     // IA32_VMX_EXIT_CTLS: VM-exit controls
+     // IA32_VMX_MISC: various VMX capabilities
+
+     constexpr std::uint64_t IA32_VMX_PROC_CTLS = 0x482;
+     constexpr std::uint64_t IA32_VMX_PROC_CTLS2 = 0x48B;
+     constexpr std::uint64_t IA32_VMX_ENTRY_CTLS = 0x484;
+     constexpr std::uint64_t IA32_VMX_EXIT_CTLS = 0x483;
+     constexpr std::uint64_t IA32_VMX_MISC = 0x485;
+
+     const auto procCtls = ReadMsr(IA32_VMX_PROC_CTLS);
+     const auto procCtls2 = ReadMsr(IA32_VMX_PROC_CTLS2);
+     const auto entryCtls = ReadMsr(IA32_VMX_ENTRY_CTLS);
+     const auto exitCtls = ReadMsr(IA32_VMX_EXIT_CTLS);
+     const auto misc = ReadMsr(IA32_VMX_MISC);
+
+     if ((procCtls & (1ull << 2)) == 0 || (procCtls & (1ull << 9)) == 0 || (entryCtls & (1ull << 9)) == 0 ||
+         (exitCtls & (1ull << 15)) == 0)
+     {
+          debugging::DbgWrite(u8"Required VMX controls not supported on this CPU. Halting.\r\n");
+          debugging::DbgWrite(u8"IA32_VMX_PROC_CTLS: {:x}\r\n", procCtls);
+          debugging::DbgWrite(u8"IA32_VMX_PROC_CTLS2: {:x}\r\n", procCtls2);
+          debugging::DbgWrite(u8"IA32_VMX_ENTRY_CTLS: {:x}\r\n", entryCtls);
+          debugging::DbgWrite(u8"IA32_VMX_EXIT_CTLS: {:x}\r\n", exitCtls);
+          debugging::DbgWrite(u8"IA32_VMX_MISC: {:x}\r\n", misc);
+          process::KeExitCurrentThread();
+     }
+
+     std::uint64_t vmxProcCtls = procCtls | (1ull << 2) | (1ull << 9);
+     if (procCtls2 & (1ull << 0)) vmxProcCtls |= (1ull << 31);
+     WriteMsr(IA32_VMX_PROC_CTLS, vmxProcCtls);
+     WriteCR(4, ReadCR(4) | (1ull << 13));
+
+     debugging::DbgWrite(u8"VMX enabled on current processor\r\n");
+}
+
 extern "C" NO_ASAN int KiStartup(arch::LoaderParameterBlock* param)
 {
-     __asan_init();
-
+     debugging::DbgWrite(u8"Kernel image base: {:x}, size: {:x}\r\n", param->kernelVirtualBase, param->kernelSize);
+     __security_init_cookie();
      if (param->systemMajor != OsVersionMajor || param->systemMinor != OsVersionMinor) return 1;
      cpu::g_systemBootTimeOffsetSeconds = param->bootTimeSeconds;
 
      param =
          reinterpret_cast<arch::LoaderParameterBlock*>(reinterpret_cast<std::uintptr_t>(param) + 0xffff'8000'0000'0000);
-     KiInitialise(param);
+     const auto mpPage = KiInitialise(param);
+     const auto start = static_cast<std::uint64_t>(KeReadHighResolutionTimerMS());
 
      auto framebuffer = param->framebuffer;
 
      std::uint32_t* buffer = reinterpret_cast<std::uint32_t*>(param->framebuffer.physicalStart + 0xffff'8000'0000'0000);
+
      std::uint32_t* bbuffer = static_cast<std::uint32_t*>(
          g_kernelProcess->AllocateVirtualMemory(nullptr, framebuffer.totalSize,
                                                 memory::AllocationFlags::Commit | memory::AllocationFlags::Reserve |
@@ -966,34 +1112,47 @@ extern "C" NO_ASAN int KiStartup(arch::LoaderParameterBlock* param)
 
      memory::KiHeapInitialise();
 
-     object::KeInitialiseOb();
-     process::KiInitialiseTaskScheduler(0, reinterpret_cast<void*>(KiIdleLoop), param->stackVirtualBase);
-     process::KeCurrentCpu()->irql.store(cpu::IRQL::Passive, std::memory_order::release);
-
-     KeInitialisePCIE();
-     memset(buffer, 0, framebuffer.totalSize);
      VidInitialise(VdiFrameBuffer{.framebuffer = buffer,
                                   .width = framebuffer.width,
                                   .height = framebuffer.height,
                                   .scalineSize = framebuffer.scanlineSize,
                                   .optionalBackbuffer = bbuffer},
                    operator new);
+     KeDrawBgrt();
      VidExchangeBuffers();
-     // kasan::KeInitialise();
+
+     object::KeInitialiseOb();
+     auto* self =
+         process::KiInitialiseTaskScheduler(reinterpret_cast<void*>(KiIdleLoop), param->stackVirtualBase, true);
+     self->stackSize = g_loaderBlock->stackSize;
+     process::KeCurrentCpu()->irql.store(cpu::IRQL::Passive, std::memory_order::release);
+
+     UpdateProgressBar(); // CPU
+     KeInitialisePCIE();
+     UpdateProgressBar(); // PCIe
+     g_idleCounter.store(0, std::memory_order::release);
+     const auto count = KeDetectAndInitialiseProcessors(mpPage);
+     debugging::DbgWrite(u8"Detected {} processors\r\n", count);
+     UpdateProgressBar(); // MP
+
+     while (g_idleCounter.load(std::memory_order::relaxed) < count) operations::Halt();
+
+     UpdateProgressBar(); // MP lock
 
 #ifdef ARCH_X8664
      constexpr cpu::InterruptVector SerialVector = 0x24;
      KeRegisterInterruptHandler(0x4, SerialVector, SerialInterruptHandler);
 #endif
+     UpdateProgressBar(); // Serial
      operations::InitialiseSerial();
-     debugging::DbgWrite(u8"mem regions:\r\n");
-     debugging::DbgWrite(u8"  Stack: Base={}, Size={}\r\n", reinterpret_cast<void*>(g_stackBase), g_stackSize);
-     debugging::DbgWrite(u8"  Image: Base={}, Size={}\r\n", reinterpret_cast<void*>(g_imageBase), g_imageSize);
-     KASANAllocateHeap(bbuffer, framebuffer.totalSize);
 
-     VidDumpObjectTree(object::g_rootDirectoryHeader);
+     synchronisation::SpinLock* lock = new synchronisation::SpinLock{};
 
-     KiIdleLoop();
+     UpdateProgressBar(); // Done
+     const auto end = static_cast<std::uint64_t>(KeReadHighResolutionTimerMS());
+     const auto initTime = end - start;
+     debugging::DbgWrite(u8"Initialisation took {} ms\r\n", initTime);
+     process::KeExitCurrentThread();
      while (true)
      {
           VidExchangeBuffers();
@@ -1569,4 +1728,229 @@ extern "C" int _purecall() // NOLINT
      operations::DisableInterrupts();
      while (true) operations::Halt();
 }
-extern "C" int _fltused = 1;
+__declspec(dllexport) extern "C" int _fltused = 1;
+
+struct SourceLocation
+{
+     const char* filename;
+     std::uint32_t line;
+     std::uint32_t column;
+};
+struct TypeDescriptor
+{
+     std::uint16_t kind;
+     std::uint16_t info;
+     char name[];
+};
+struct FunctionTypeMismatchData
+{
+     SourceLocation location;
+     TypeDescriptor* type;
+};
+
+// UBSAN
+
+extern "C" void __ubsan_handle_function_type_mismatch(const FunctionTypeMismatchData* data, std::uintptr_t pointer)
+{
+     debugging::DbgWrite(
+         u8"UBSAN: Function type mismatch at {}:{}:{} - pointer {:x} does not match expected type {}\r\n",
+         reinterpret_cast<const char8_t*>(data->location.filename), data->location.line, data->location.column, pointer,
+         reinterpret_cast<const char8_t*>(data->type->name));
+}
+// __ubsan_handle_builtin_unreachable
+extern "C" void __ubsan_handle_builtin_unreachable(const SourceLocation* location)
+{
+     debugging::DbgWrite(u8"UBSAN: Reached unreachable code at {}:{}:{}\r\n",
+                         reinterpret_cast<const char8_t*>(location->filename), location->line, location->column);
+}
+// __ubsan_handle_divrem_overflow
+extern "C" void __ubsan_handle_divrem_overflow(const SourceLocation* location)
+{
+     debugging::DbgWrite(u8"UBSAN: Division overflow at {}:{}:{}\r\n",
+                         reinterpret_cast<const char8_t*>(location->filename), location->line, location->column);
+}
+// __ubsan_handle_load_invalid_value
+extern "C" void __ubsan_handle_load_invalid_value(const SourceLocation* location, std::uintptr_t value)
+{
+     debugging::DbgWrite(u8"UBSAN: Load of invalid value {:x} at {}:{}:{}\r\n", value,
+                         reinterpret_cast<const char8_t*>(location->filename), location->line, location->column);
+}
+// __ubsan_handle_nonnull_return_v1
+extern "C" void __ubsan_handle_nonnull_return_v1(const SourceLocation* location)
+{
+     debugging::DbgWrite(u8"UBSAN: Non-null return violation at {}:{}:{}\r\n",
+                         reinterpret_cast<const char8_t*>(location->filename), location->line, location->column);
+}
+// __ubsan_handle_add_overflow
+extern "C" void __ubsan_handle_add_overflow(const SourceLocation* location, std::uintptr_t lhs, std::uintptr_t rhs)
+{
+     debugging::DbgWrite(u8"UBSAN: Addition overflow of {:x} + {:x} at {}:{}:{}\r\n", lhs, rhs,
+                         reinterpret_cast<const char8_t*>(location->filename), location->line, location->column);
+}
+// __ubsan_handle_sub_overflow
+extern "C" void __ubsan_handle_sub_overflow(const SourceLocation* location, std::uintptr_t lhs, std::uintptr_t rhs)
+{
+     debugging::DbgWrite(u8"UBSAN: Subtraction overflow of {:x} - {:x} at {}:{}:{}\r\n", lhs, rhs,
+                         reinterpret_cast<const char8_t*>(location->filename), location->line, location->column);
+}
+// __ubsan_handle_mul_overflow
+extern "C" void __ubsan_handle_mul_overflow(const SourceLocation* location, std::uintptr_t lhs, std::uintptr_t rhs)
+{
+     debugging::DbgWrite(u8"UBSAN: Multiplication overflow of {:x} * {:x} at {}:{}:{}\r\n", lhs, rhs,
+                         reinterpret_cast<const char8_t*>(location->filename), location->line, location->column);
+}
+// __ubsan_handle_float_cast_overflow
+extern "C" void __ubsan_handle_float_cast_overflow(const SourceLocation* location, std::uintptr_t from,
+                                                   std::uintptr_t to)
+{
+     debugging::DbgWrite(u8"UBSAN: Float cast overflow from {:x} to {:x} at {}:{}:{}\r\n", from, to,
+                         reinterpret_cast<const char8_t*>(location->filename), location->line, location->column);
+}
+// __ubsan_handle_out_of_bounds
+extern "C" void __ubsan_handle_out_of_bounds(const SourceLocation* location, std::uintptr_t index, std::uintptr_t bound)
+{
+     debugging::DbgWrite(u8"UBSAN: Out of bounds access of index {:x} with bound {:x} at {}:{}:{}\r\n", index, bound,
+                         reinterpret_cast<const char8_t*>(location->filename), location->line, location->column);
+}
+// __ubsan_handle_shift_out_of_bounds
+extern "C" void __ubsan_handle_shift_out_of_bounds(const SourceLocation* location, std::uintptr_t lhs,
+                                                   std::uintptr_t rhs)
+{
+     debugging::DbgWrite(u8"UBSAN: Shift out of bounds of {:x} by {:x} at {}:{}:{}\r\n", lhs, rhs,
+                         reinterpret_cast<const char8_t*>(location->filename), location->line, location->column);
+}
+// __ubsan_handle_type_mismatch_v1
+struct TypeMismatchData
+{
+     SourceLocation location;
+     TypeDescriptor* type;
+     std::uint8_t alignment;
+     std::uint8_t typeCheckKind;
+};
+enum struct TypeCheckKind
+{
+     Load = 0,
+     Store = 1,
+     ReferenceBinding = 2,
+     MemberAccess = 3,
+     ConstructorCall = 4,
+     DowncastPointer = 5,
+     DowncastReference = 6,
+     UpcastPointer = 7,
+     NonnullAssign = 8,
+     DynamicTypeCheck = 9
+};
+const char8_t* TypeCheckKindToStr(TypeCheckKind kind)
+{
+     switch (kind)
+     {
+     case TypeCheckKind::Load: return u8"Load";
+     case TypeCheckKind::Store: return u8"Store";
+     case TypeCheckKind::ReferenceBinding: return u8"ReferenceBinding";
+     case TypeCheckKind::MemberAccess: return u8"MemberAccess";
+     case TypeCheckKind::ConstructorCall: return u8"ConstructorCall";
+     case TypeCheckKind::DowncastPointer: return u8"DowncastPointer";
+     case TypeCheckKind::DowncastReference: return u8"DowncastReference";
+     case TypeCheckKind::UpcastPointer: return u8"UpcastPointer";
+     case TypeCheckKind::NonnullAssign: return u8"NonnullAssign";
+     case TypeCheckKind::DynamicTypeCheck: return u8"DynamicTypeCheck";
+     default: return u8"Unknown";
+     }
+}
+enum struct ErrorType
+{
+     Undefined,
+     NullDereference,
+     NullableDereference,
+     NullWithOffsetDereference,
+     MisalignedPointerDereference,
+     InefficientObjectSize
+};
+__attribute__((no_stack_protector)) extern "C" void __ubsan_handle_type_mismatch_v1(const TypeMismatchData* data,
+                                                                                    std::uintptr_t pointer)
+{
+     // dump it
+     const auto* type = data->type;
+     const auto& location = data->location;
+     const auto alignment = 1uz << data->alignment;
+     const auto typeCheckKind = static_cast<TypeCheckKind>(data->typeCheckKind);
+     ErrorType errorType = ErrorType::Undefined;
+     if (pointer == 0)
+     {
+          errorType = typeCheckKind == TypeCheckKind::NonnullAssign ? ErrorType::NullableDereference
+                                                                    : ErrorType::NullDereference;
+     }
+     else if ((pointer & (alignment - 1)) != 0) { errorType = ErrorType::MisalignedPointerDereference; }
+     else
+     {
+          errorType = ErrorType::InefficientObjectSize;
+     }
+
+     debugging::DbgWrite(
+         u8"UBSAN: Type mismatch ({} of type {}) at {}:{}:{} - pointer {:x} does not point to an object of type {}\r\n",
+         TypeCheckKindToStr(typeCheckKind),
+         errorType == ErrorType::NullDereference                ? u8"null pointer"
+         : errorType == ErrorType::NullableDereference          ? u8"null pointer with nonnull attribute"
+         : errorType == ErrorType::MisalignedPointerDereference ? u8"misaligned pointer"
+                                                                : u8"pointer with inefficient object size",
+         reinterpret_cast<const char8_t*>(location.filename), location.line, location.column, pointer,
+         reinterpret_cast<const char8_t*>(type->name));
+}
+// __ubsan_handle_pointer_overflow
+extern "C" void __ubsan_handle_pointer_overflow(const SourceLocation* location, std::uintptr_t base,
+                                                std::uintptr_t result)
+{
+     debugging::DbgWrite(u8"UBSAN: Pointer overflow at {}:{}:{} - base {:x} resulted in {:x}\r\n",
+                         reinterpret_cast<const char8_t*>(location->filename), location->line, location->column, base,
+                         result);
+}
+
+__declspec(dllexport) extern "C" std::uintptr_t __security_cookie = 0x2B992DDFA232;
+__declspec(dllexport) extern "C" std::uintptr_t __security_cookie_complement = ~0x2B992DDFA232;
+
+__declspec(noreturn) void __cdecl __report_gsfailure(_In_ uintptr_t _StackCookie)
+{
+     debugging::DbgWrite(u8"GS failure detected! Halting.\r\n");
+     CONTEXT ctx{};
+     KeCaptureContext(&ctx);
+     debugging::DbgWrite(u8"RIP: {:x} RSP: {:x} RBP: {:x}\r\n", ctx.Rip, ctx.Rsp, ctx.Rbp);
+     debugging::DbgWrite(u8"RAX: {:x} RBX: {:x} RCX: {:x} RDX: {:x}\r\n", ctx.Rax, ctx.Rbx, ctx.Rcx, ctx.Rdx);
+     debugging::DbgWrite(
+         u8"RSI: {:x} RDI: {:x} R8: {:x} R9: {:x} R10: {:x} R11: {:x} R12: {:x} R13: {:x} R14: {:x} R15: {:x}\r\n",
+         ctx.Rsi, ctx.Rdi, ctx.R8, ctx.R9, ctx.R10, ctx.R11, ctx.R12, ctx.R13, ctx.R14, ctx.R15);
+     debugging::DbgWrite(u8"Stack cookie value: {:x}\r\n", _StackCookie);
+     __debugbreak();
+}
+
+extern std::atomic<bool> haltInProgress;
+
+__declspec(dllexport) extern "C" void __security_check_cookie(std::uintptr_t cookie) noexcept
+{
+     operations::DisableInterrupts();
+
+     while (haltInProgress.exchange(true, std::memory_order::acq_rel)) operations::Halt();
+     debugging::DbgWrite(u8"Checking security cookie {:x} against expected {:x}\r\n", cookie, __security_cookie);
+     haltInProgress.store(false, std::memory_order_release);
+     if (cookie != __security_cookie)
+     {
+          while (cookie & 0xffff)
+          {
+               __report_gsfailure(cookie);
+               cookie >>= 16;
+          }
+     }
+     operations::EnableInterrupts();
+}
+
+__attribute__((no_stack_protector)) extern "C" void __security_init_cookie() noexcept
+{
+     debugging::DbgWrite(u8"Initialising security cookie\r\n");
+     std::uintptr_t value = __rdtsc();
+
+     value ^= 0xDEADBEEFCAFEBABE;
+
+     __security_cookie = value;
+     __security_cookie_complement = ~value;
+     debugging::DbgWrite(u8"Security cookie initialised to {:x} with complement {:x}\r\n", __security_cookie,
+                         __security_cookie_complement);
+}

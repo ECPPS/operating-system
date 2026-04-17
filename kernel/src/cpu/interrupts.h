@@ -68,6 +68,17 @@ struct MADTEntry
      std::uint8_t length;
 };
 
+struct MADTEntryLAPIC
+{
+     MADTEntry header; // type = 0, length = 8
+     std::uint8_t apicProcessorId;
+     std::uint8_t apicId;
+     std::uint32_t flags;
+     std::uint32_t signature;
+     std::uint32_t featureFlags;
+     std::uint64_t reserved;
+};
+
 struct MCFG
 {
      ACPISDTHeader header;
@@ -212,21 +223,22 @@ using InterruptHandler = bool (*)(cpu::IInterruptFrame&, void* argument);
 bool KiInitialiseInterrupts(std::uintptr_t acpiPhysical);
 void HandleInterrupt(cpu::IInterruptFrame& frame);
 void KeAcknowledgeInterrupt();
-void KeSetTimerFrequency(std::uint32_t frequency);
+void KeSetTimerFrequency(std::uint32_t frequency, bool isBSP = true);
 std::uint64_t KeReadLowResolutionTimer();
 std::uint64_t KeReadHighResolutionTimer();
 std::uint64_t KeReadLowResolutionTimerFrequency();
 std::uint64_t KeReadHighResolutionTimerFrequency();
 std::uint64_t KeCurrentSystemTime(); // milliseconds!!!
+double KeReadHighResolutionTimerMS();
 void KeRegisterInterruptHandler(cpu::InterruptVector physical, cpu::InterruptVector vector, InterruptHandler handler,
                                 void* argument = nullptr);
 cpu::IRQL KeRaiseIrql(cpu::IRQL newIrql);
 void KeLowerIrql(cpu::IRQL newIrql);
-
-double KeReadHighResolutionTimerMS();
+void KeDrawBgrt();
+std::uintptr_t KiPCFromInterruptFrame(void* frame);
 
 template <typename TLambda> struct [[nodiscard]] Defer : TLambda
 {
      explicit Defer(TLambda lambda) : TLambda(std::move(lambda)) {}
-     ~Defer() { operator()(); }
+     ~Defer() { (*this)(); }
 };

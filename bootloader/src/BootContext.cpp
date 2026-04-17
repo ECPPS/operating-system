@@ -203,7 +203,7 @@ namespace bootloader
           mapping.size = alignedSize;
           mapping.writable = writable;
           mapping.userAccessible = false;
-          mapping.cacheDisable = false;
+          mapping.executable = true;
 
           bool result = memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory);
           if (result) TrackMappedRegion(alignedStart, alignedSize, name);
@@ -319,7 +319,6 @@ namespace bootloader
                mapping.size = 0x1000;
                mapping.writable = true;
                mapping.userAccessible = false;
-               mapping.cacheDisable = false;
 
                if (!memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory))
                {
@@ -383,7 +382,6 @@ namespace bootloader
                     mapping.size = headerSize;
                     mapping.writable = false;
                     mapping.userAccessible = false;
-                    mapping.cacheDisable = false;
 
                     if (!memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory)) return false;
 
@@ -416,7 +414,6 @@ namespace bootloader
                     mapping.writable = writable;
                     mapping.executable = executable;
                     mapping.userAccessible = false;
-                    mapping.cacheDisable = false;
 
                     if (!memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory)) return false;
 
@@ -451,7 +448,6 @@ namespace bootloader
                mapping.size = headerSize;
                mapping.writable = false;
                mapping.userAccessible = false;
-               mapping.cacheDisable = false;
 
                if (!memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory)) return false;
 
@@ -477,7 +473,7 @@ namespace bootloader
                mapping.size = secSize;
                mapping.writable = writable;
                mapping.userAccessible = false;
-               mapping.cacheDisable = false;
+               mapping.executable = (sec.characteristics & 0x20000000) != 0;
 
                if (!memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory)) return false;
 
@@ -499,7 +495,6 @@ namespace bootloader
                     mapping.size = iatSize;
                     mapping.writable = true;
                     mapping.userAccessible = false;
-                    mapping.cacheDisable = false;
 
                     if (!memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory)) return false;
 
@@ -602,7 +597,6 @@ namespace bootloader
           mapping.size = alignedSize;
           mapping.writable = true;
           mapping.userAccessible = false;
-          mapping.cacheDisable = false;
 
           bool result = memory::paging::MapPage(this->_pageTableRoot, mapping, AllocatePageTableMemory);
           if (result) TrackMappedRegion(alignedVirtStart, alignedSize, L"Kernel Stack");

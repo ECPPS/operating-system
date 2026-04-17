@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include "../cpu/interrupts.h"
+#include "../device/dpc.h"
 #include "process.h"
 #include "thread.h"
 #include "utils/operations.h"
@@ -13,6 +14,7 @@ namespace process
      {
           CpuLocal* self;
           std::uint32_t cpuId;
+          bool isBSP;
           Thread* thread;
           std::uintptr_t kernelRSP;
           std::uintptr_t userRSP;
@@ -23,6 +25,7 @@ namespace process
           std::atomic<bool> selectionLock{};
           std::atomic<bool> canReschedule{};
           std::array<Thread*, static_cast<std::size_t>(ThreadPriority::Count_)> readyQueues{};
+          structures::AtomicSingleList<device::DPC> dpcQueue{};
 
           void LockSelection()
           {
@@ -35,13 +38,6 @@ namespace process
                }
           }
 
-          bool TryLockSelection()
-          {
-               bool expected = false;
-               return selectionLock.compare_exchange_strong(expected, true, std::memory_order::acquire,
-                                                            std::memory_order::relaxed);
-          }
-
           void UnlockSelection() { selectionLock.store(false, std::memory_order::release); }
      };
 
@@ -51,7 +47,7 @@ namespace process
 
      std::uint64_t KiAllocateThreadId();
      void* KiSwitchThread(void* lpRegisters);
-     void KiInitialiseTaskScheduler(std::uint64_t cpuId, void* idleProcedure, std::uintptr_t stackPointer = 0);
+     Thread* KiInitialiseTaskScheduler(void* idleProcedure, std::uintptr_t stackPointer, bool isBSP);
      bool KeHasRunnableThreads() noexcept;
 
      object::Handle KiCreateKernelThread(ThreadRoutine entryPoint, void* parameter, ThreadPriority priority);
@@ -61,5 +57,6 @@ namespace process
      void KiPsWakeThread(Thread* thread);
      void KiPsYieldThread();
      void KiPsBlockThread(ThreadState newState);
-
+     void KeExitCurrentThread();
 }; // namespace process
+void KiSetCpuLocal(process::CpuLocal* cpuLocal);

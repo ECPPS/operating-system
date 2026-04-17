@@ -1,3 +1,5 @@
+#include <cstdint>
+#include "process/taskScheduler.h"
 #include "utils/kdbg.h"
 extern "C" int _CrtDbgReport(int reportType, // NOLINT(readability-identifier-naming)
                              const char* filename, int linenumber, const char* moduleName, const char* format, ...)
@@ -18,11 +20,26 @@ extern "C" float __cdecl ceilf(const float x) // NOLINT
      return static_cast<float>(i);
 }
 
-// chkstk
-extern "C" void __chkstk() // NOLINT
+__declspec(dllexport) __attribute__((no_stack_protector)) extern "C" std::uint64_t __chkstk() // NOLINT
 {
-     // No-op on x86-64 since the architecture guarantees a 4KiB red zone below the stack pointer.
+     unsigned __int64 result; // rax
+     char* v1;                // r10
+     char* StackLimit;        // r11
+     char v3;                 // [rsp+18h] [rbp+8h] BYREF
+
+     v1 = &v3 - result;
+     if ((unsigned __int64)&v3 < result) v1 = 0;
+     StackLimit = (char*)process::KeCurrentThread()->stackBase + process::KeCurrentThread()->stackSize;
+     if (v1 < StackLimit)
+     {
+          //LOWORD(v1) = (unsigned __int16)v1 & 0xF000
+          v1 = (char*)((unsigned __int64)v1 & 0xFFFFFFFFFFFF0000);
+          do StackLimit -= 4096;
+          while (v1 < StackLimit);
+     }
+     return result;
 }
+
 extern "C" std::uintptr_t __CxxFrameHandler4(void*, void*, void*, void*) noexcept
 {
      debugging::DbgWrite(u8"*** Unhandled C++ exception - system is likely unstable! ***\r\n");

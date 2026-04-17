@@ -54,6 +54,7 @@ namespace process
           std::uintptr_t kernelRsp{};
           int quantumCounter{};
           std::uint64_t argument{};
+          std::uint64_t stackSize{ThreadStackSize};
 
           Thread(const Thread&) = delete;
           Thread(Thread&&) = default;

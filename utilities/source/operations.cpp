@@ -55,17 +55,11 @@ namespace
           return value;
      }
      NO_ASAN inline void Out8(std::uint16_t port, std::uint8_t value)
-     {
-          asm volatile("outb %0, %1" : : "a"(value), "Nd"(port));
-     }
+     { asm volatile("outb %0, %1" : : "a"(value), "Nd"(port)); }
      NO_ASAN inline void Out16(std::uint16_t port, std::uint16_t value)
-     {
-          asm volatile("outw %0, %1" : : "a"(value), "Nd"(port));
-     }
+     { asm volatile("outw %0, %1" : : "a"(value), "Nd"(port)); }
      NO_ASAN inline void Out32(std::uint16_t port, std::uint32_t value)
-     {
-          asm volatile("outl %0, %1" : : "a"(value), "Nd"(port));
-     }
+     { asm volatile("outl %0, %1" : : "a"(value), "Nd"(port)); }
 #endif
      } // namespace
 
@@ -167,6 +161,15 @@ NO_ASAN std::uint64_t operations::ReadCurrentCycles()
      return (static_cast<std::uint64_t>(high) << 32) | low;
 }
 NO_ASAN void operations::Halt() { asm volatile("hlt"); }
+NO_ASAN bool operations::SupportsVMX()
+{
+     std::uint32_t eax{};
+     std::uint32_t ebx{};
+     std::uint32_t ecx{};
+     std::uint32_t edx{};
+     asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1));
+     return (ecx & (1 << 5)) != 0;
+}
 
 #endif
 

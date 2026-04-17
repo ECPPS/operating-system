@@ -2,6 +2,7 @@
 #include <utils/identify.h>
 #include <utils/memory.h>
 #include <algorithm>
+#include <atomic>
 #include "../process/taskScheduler.h"
 #include "utils/kdbg.h"
 #include "utils/operations.h"
@@ -20,6 +21,18 @@ namespace memory
           FreeNode* next;
      };
 
+     void VADNodeAllocator::AcquireLock() noexcept
+     {
+          bool expected = false;
+          while (!_lock.compare_exchange_weak(expected, true, std::memory_order::acquire, std::memory_order::relaxed))
+          {
+               expected = false;
+               operations::Yield();
+          }
+     }
+
+     void VADNodeAllocator::ReleaseLock() noexcept { _lock.store(false, std::memory_order::release); }
+
      bool VADNodeAllocator::AllocateNodePage()
      {
           std::uintptr_t physPage = physicalAllocator.AllocatePage(PFNUse::KernelHeap);
@@ -30,15 +43,14 @@ namespace memory
           }
 
           auto* page = reinterpret_cast<struct FreeNode*>(physPage + physicalAllocator.physToVirtOffset);
-
-          std::size_t nodesPerPage = PAGE_SIZE / sizeof(VADNode);
           auto* nodeArray = reinterpret_cast<VADNode*>(page);
 
+          const std::size_t nodesPerPage = PAGE_SIZE / sizeof(VADNode);
           for (std::size_t i = 0; i < nodesPerPage; i++)
           {
                auto* freeNode = reinterpret_cast<struct FreeNode*>(&nodeArray[i]);
                freeNode->next = reinterpret_cast<struct FreeNode*>(_freeList);
-               this->_freeList = freeNode;
+               _freeList = freeNode;
           }
 
           return true;
@@ -46,18 +58,25 @@ namespace memory
 
      VADNode* VADNodeAllocator::AllocateNode(const VADEntry& entry)
      {
-          if (this->_freeList == nullptr)
+          AcquireLock();
+
+          if (_freeList == nullptr)
           {
-               if (!AllocateNodePage()) return nullptr;
+               if (!AllocateNodePage())
+               {
+                    ReleaseLock();
+                    return nullptr;
+               }
           }
 
-          struct FreeNode* freeNode = reinterpret_cast<struct FreeNode*>(_freeList);
-          this->_freeList = freeNode->next;
+          auto* freeNode = reinterpret_cast<struct FreeNode*>(_freeList);
+          _freeList = freeNode->next;
 
           auto* node = reinterpret_cast<VADNode*>(freeNode);
           new (node) VADNode(entry);
 
-          this->_nodesAllocated++;
+          _nodesAllocated++;
+          ReleaseLock();
           return node;
      }
 
@@ -71,12 +90,25 @@ namespace memory
 
           node->~VADNode();
 
+          AcquireLock();
           auto* freeNode = reinterpret_cast<struct FreeNode*>(node);
           freeNode->next = reinterpret_cast<struct FreeNode*>(_freeList);
-          this->_freeList = freeNode;
-
-          this->_nodesFreed++;
+          _freeList = freeNode;
+          _nodesFreed++;
+          ReleaseLock();
      }
+
+     void VirtualMemoryAllocator::AcquireLock() noexcept
+     {
+          bool expected = false;
+          while (!_lock.compare_exchange_weak(expected, true, std::memory_order::acquire, std::memory_order::relaxed))
+          {
+               expected = false;
+               operations::Yield();
+          }
+     }
+
+     void VirtualMemoryAllocator::ReleaseLock() noexcept { _lock.store(false, std::memory_order::release); }
 
      void VirtualMemoryAllocator::UpdateMaxEnd(VADNode* node)
      {
@@ -108,7 +140,7 @@ namespace memory
 
           y->parent = x->parent;
 
-          if (!x->parent) this->_root = y;
+          if (!x->parent) _root = y;
           else if (x == x->parent->left)
                x->parent->left = y;
           else
@@ -130,7 +162,7 @@ namespace memory
 
           x->parent = y->parent;
 
-          if (!y->parent) this->_root = x;
+          if (!y->parent) _root = x;
           else if (y == y->parent->left)
                y->parent->left = x;
           else
@@ -164,7 +196,6 @@ namespace memory
                               z = z->parent;
                               RotateLeft(z);
                          }
-
                          z->parent->colour = RBColour::Black;
                          z->parent->parent->colour = RBColour::Red;
                          RotateRight(z->parent->parent);
@@ -187,14 +218,13 @@ namespace memory
                               z = z->parent;
                               RotateRight(z);
                          }
-
                          z->parent->colour = RBColour::Black;
                          z->parent->parent->colour = RBColour::Red;
                          RotateLeft(z->parent->parent);
                     }
                }
           }
-          this->_root->colour = RBColour::Black;
+          _root->colour = RBColour::Black;
      }
 
      bool VirtualMemoryAllocator::Insert(const VADEntry& entry)
@@ -215,7 +245,7 @@ namespace memory
           }
 
           VADNode* y = nullptr;
-          VADNode* x = this->_root;
+          VADNode* x = _root;
 
           while (x)
           {
@@ -227,27 +257,24 @@ namespace memory
 
           z->parent = y;
 
-          if (y == nullptr) this->_root = z;
+          if (y == nullptr) _root = z;
           else if (z->entry.baseAddress < y->entry.baseAddress)
                y->left = z;
           else
                y->right = z;
 
           UpdateMaxEndUpwards(z);
-
           FixInsert(z);
-
           return true;
      }
 
      VADNode* VirtualMemoryAllocator::Search(std::uintptr_t baseAddress)
      {
-          VADNode* current = this->_root;
+          VADNode* current = _root;
 
           while (current)
           {
                if (baseAddress == current->entry.baseAddress) return current;
-
                if (baseAddress < current->entry.baseAddress) current = current->left;
                else
                     current = current->right;
@@ -259,7 +286,7 @@ namespace memory
 
      VADNode* VirtualMemoryAllocator::FindOverlap(std::uintptr_t baseAddress, std::size_t size)
      {
-          std::uintptr_t endAddress = baseAddress + size;
+          const std::uintptr_t endAddress = baseAddress + size;
           VADNode* current = _root;
 
           while (current)
@@ -276,7 +303,7 @@ namespace memory
 
      VADNode* VirtualMemoryAllocator::FindContaining(std::uintptr_t address)
      {
-          VADNode* current = this->_root;
+          VADNode* current = _root;
 
           while (current)
           {
@@ -287,7 +314,6 @@ namespace memory
                     current = current->right;
           }
 
-          // debugging::DbgWrite(u8"[FindContaining] {} not found\r\n", reinterpret_cast<void*>(address));
           return nullptr;
      }
 
@@ -310,7 +336,7 @@ namespace memory
 
      void VirtualMemoryAllocator::FixDelete(VADNode* x, VADNode* xParent)
      {
-          while (x != this->_root && (x == nullptr || x->colour == RBColour::Black))
+          while (x != _root && (x == nullptr || x->colour == RBColour::Black))
           {
                if (x == (xParent ? xParent->left : nullptr))
                {
@@ -350,7 +376,7 @@ namespace memory
                          xParent->colour = RBColour::Black;
                          if (w->right) w->right->colour = RBColour::Black;
                          RotateLeft(xParent);
-                         x = this->_root;
+                         x = _root;
                     }
                }
                else
@@ -390,7 +416,7 @@ namespace memory
                          xParent->colour = RBColour::Black;
                          if (w->left) w->left->colour = RBColour::Black;
                          RotateRight(xParent);
-                         x = this->_root;
+                         x = _root;
                     }
                }
           }
@@ -409,25 +435,25 @@ namespace memory
 
           if (z->entry.state == VADMemoryState::Reserved || z->entry.state == VADMemoryState::Committed)
           {
-               if (this->_stats.totalReservedBytes.load(std::memory_order::relaxed) >= z->entry.size)
-                    this->_stats.totalReservedBytes.fetch_sub(z->entry.size, std::memory_order::relaxed);
+               if (_stats.totalReservedBytes.load(std::memory_order::relaxed) >= z->entry.size)
+                    _stats.totalReservedBytes.fetch_sub(z->entry.size, std::memory_order::relaxed);
           }
 
           if (z->entry.state == VADMemoryState::Committed)
           {
-               if (this->_stats.totalCommittedBytes.load(std::memory_order::relaxed) >= z->entry.size)
-                    this->_stats.totalCommittedBytes.fetch_sub(z->entry.size, std::memory_order::relaxed);
-               if (this->_stats.commitCharge.load(std::memory_order::relaxed) >= z->entry.size)
-                    this->_stats.commitCharge.fetch_sub(z->entry.size, std::memory_order::relaxed);
+               if (_stats.totalCommittedBytes.load(std::memory_order::relaxed) >= z->entry.size)
+                    _stats.totalCommittedBytes.fetch_sub(z->entry.size, std::memory_order::relaxed);
+               if (_stats.commitCharge.load(std::memory_order::relaxed) >= z->entry.size)
+                    _stats.commitCharge.fetch_sub(z->entry.size, std::memory_order::relaxed);
           }
 
           if (z->entry.immediatePhysical &&
               _stats.totalImmediateBytes.load(std::memory_order::relaxed) >= z->entry.size)
           {
-               this->_stats.totalImmediateBytes.fetch_sub(z->entry.size, std::memory_order::relaxed);
+               _stats.totalImmediateBytes.fetch_sub(z->entry.size, std::memory_order::relaxed);
           }
 
-          this->_stats.releaseOperations.fetch_add(1, std::memory_order::relaxed);
+          _stats.releaseOperations.fetch_add(1, std::memory_order::relaxed);
 
           VADNode* y = z;
           VADNode* x = nullptr;
@@ -473,17 +499,15 @@ namespace memory
           }
 
           if (xParent) UpdateMaxEndUpwards(xParent);
-
           if (yOriginalColour == RBColour::Black) FixDelete(x, xParent);
 
-          this->_nodeAllocator.FreeNode(z);
+          _nodeAllocator.FreeNode(z);
           return true;
      }
 
      void VirtualMemoryAllocator::InorderTraversal(VADNode* node, void (*callback)(const VADEntry&))
      {
           if (!node) return;
-
           InorderTraversal(node->left, callback);
           callback(node->entry);
           InorderTraversal(node->right, callback);
@@ -505,14 +529,14 @@ namespace memory
           return Insert(entry);
      }
 
+     static constexpr std::size_t ALLOCATION_GAP = 0x100000;
      std::uintptr_t VirtualMemoryAllocator::FindFreeRegion(std::size_t size, std::uintptr_t hint)
      {
           std::uintptr_t searchAddress = hint > 0 ? hint : _searchStart;
 
-          if (this->_root == nullptr) return searchAddress;
+          if (_root == nullptr) return searchAddress;
 
-          VADNode* current = this->_root;
-
+          VADNode* current = _root;
           while (current->left) current = current->left;
 
           std::uintptr_t candidateAddress = searchAddress;
@@ -521,8 +545,9 @@ namespace memory
           {
                if (candidateAddress + size <= current->entry.baseAddress) return candidateAddress;
 
-               candidateAddress = std::max(candidateAddress, current->entry.baseAddress + current->entry.size);
-
+               candidateAddress = AlignUp(std::max(candidateAddress, current->entry.baseAddress + current->entry.size) +
+                                              ALLOCATION_GAP,
+                                          ALLOCATION_GAP);
                if (current->right)
                {
                     current = current->right;
@@ -543,75 +568,16 @@ namespace memory
           return candidateAddress;
      }
 
-     NO_ASAN std::uintptr_t VirtualMemoryAllocator::ReserveVirtualMemory(std::size_t size, MemoryProtection protection,
-                                                                         PFNUse use)
-     {
-          size = AlignUp(size, PAGE_SIZE);
-
-          std::uintptr_t baseAddress = FindFreeRegion(size, 0);
-          if (baseAddress == 0)
-          {
-               _stats.failedAllocations.fetch_add(1, std::memory_order::relaxed);
-               return 0;
-          }
-
-          if (ReserveVirtualMemoryFixed(baseAddress, size, protection, use))
-          {
-               _stats.reserveOperations.fetch_add(1, std::memory_order::relaxed);
-               const std::size_t newReserved =
-                   _stats.totalReservedBytes.fetch_add(size, std::memory_order::relaxed) + size;
-               std::size_t currentPeak = _stats.peakReservedBytes.load(std::memory_order::relaxed);
-               while (newReserved > currentPeak && !_stats.peakReservedBytes.compare_exchange_weak(
-                                                       currentPeak, newReserved, std::memory_order::relaxed))
-               {
-               }
-               return baseAddress;
-          }
-
-          _stats.failedAllocations.fetch_add(1, std::memory_order::relaxed);
-          return 0;
-     }
-
-     NO_ASAN std::uintptr_t VirtualMemoryAllocator::ReserveVirtualMemoryAt(std::uintptr_t hint, std::size_t size,
-                                                                           MemoryProtection protection, PFNUse use)
-     {
-          size = AlignUp(size, PAGE_SIZE);
-
-          std::uintptr_t baseAddress = FindFreeRegion(size, hint);
-          if (baseAddress == 0)
-          {
-               _stats.failedAllocations.fetch_add(1, std::memory_order::relaxed);
-               return 0;
-          }
-
-          if (ReserveVirtualMemoryFixed(baseAddress, size, protection, use))
-          {
-               _stats.reserveOperations.fetch_add(1, std::memory_order::relaxed);
-               const std::size_t newReserved =
-                   _stats.totalReservedBytes.fetch_add(size, std::memory_order::relaxed) + size;
-               std::size_t currentPeak = _stats.peakReservedBytes.load(std::memory_order::relaxed);
-               while (newReserved > currentPeak && !_stats.peakReservedBytes.compare_exchange_weak(
-                                                       currentPeak, newReserved, std::memory_order::relaxed))
-               {
-               }
-               return baseAddress;
-          }
-
-          _stats.failedAllocations.fetch_add(1, std::memory_order::relaxed);
-          return 0;
-     }
-
      bool VirtualMemoryAllocator::MapPhysicalPages(VADNode* node, std::uintptr_t baseAddress, std::size_t size)
      {
           const std::size_t numPages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-          std::uintptr_t pageTable = _pageTableRoot != 0 ? _pageTableRoot : memory::paging::GetCurrentPageTable();
+          const std::uintptr_t pageTable = _pageTableRoot != 0 ? _pageTableRoot : memory::paging::GetCurrentPageTable();
 
           for (std::size_t i = 0; i < numPages; i++)
           {
                std::uintptr_t physPage = physicalAllocator.AllocatePage(node->entry.use);
                if (physPage == ~0uz)
                {
-                    // TODO: roll back previously mapped pages
                     _stats.failedAllocations.fetch_add(1, std::memory_order::relaxed);
                     debugging::DbgWrite(u8"[MapPhysicalPages] physicalAllocator.AllocatePage == ~0\r\n");
                     return false;
@@ -623,9 +589,13 @@ namespace memory
                mapping.size = PAGE_SIZE;
                mapping.writable = (static_cast<std::uint16_t>(node->entry.protection) &
                                    static_cast<std::uint16_t>(MemoryProtection::ReadWrite)) != 0;
-               mapping.userAccessible = true; // TODO: derive from protection flags
-               mapping.cacheDisable = (static_cast<std::uint16_t>(node->entry.protection) &
-                                       static_cast<std::uint16_t>(MemoryProtection::NoCache)) != 0;
+               mapping.userAccessible = baseAddress < 0x0000800000000000;
+               mapping.cachePolicy = (static_cast<std::uint16_t>(node->entry.protection) &
+                                      static_cast<std::uint16_t>(MemoryProtection::NoCache)) != 0
+                                         ? memory::CachePolicy::Uncacheable
+                                         : memory::CachePolicy::WriteBack;
+               mapping.executable = (static_cast<std::uint16_t>(node->entry.protection) &
+                                     static_cast<std::uint16_t>(MemoryProtection::Execute)) != 0;
 
                auto ptAllocator = [](std::size_t) -> void*
                {
@@ -786,7 +756,6 @@ namespace memory
                {
                     const MemoryProtection prot = node->entry.protection;
                     const PFNUse use = node->entry.use;
-
                     std::uintptr_t spanStart = baseAddress;
                     std::uintptr_t spanEnd = baseAddress + size;
 
@@ -859,30 +828,31 @@ namespace memory
           if (node->entry.immediatePhysical)
           {
                const std::size_t numPages = (decommitSize + PAGE_SIZE - 1) / PAGE_SIZE;
-               std::uintptr_t pageTable = _pageTableRoot != 0 ? _pageTableRoot : memory::paging::GetCurrentPageTable();
+               const std::uintptr_t pageTable =
+                   _pageTableRoot != 0 ? _pageTableRoot : memory::paging::GetCurrentPageTable();
 
                for (std::size_t i = 0; i < numPages; i++)
                {
-                    std::uintptr_t virtualAddr = decommitStart + (i * PAGE_SIZE);
+                    const std::uintptr_t virtualAddr = decommitStart + (i * PAGE_SIZE);
 
                     auto* pml4 = reinterpret_cast<std::uint64_t*>(pageTable);
-                    std::uint64_t pml4Index = (virtualAddr >> 39) & 0x1FF;
-                    std::uint64_t pdptIndex = (virtualAddr >> 30) & 0x1FF;
-                    std::uint64_t pdIndex = (virtualAddr >> 21) & 0x1FF;
-                    std::uint64_t ptIndex = (virtualAddr >> 12) & 0x1FF;
+                    const std::uint64_t pml4Index = (virtualAddr >> 39) & 0x1FF;
+                    const std::uint64_t pdptIndex = (virtualAddr >> 30) & 0x1FF;
+                    const std::uint64_t pdIndex = (virtualAddr >> 21) & 0x1FF;
+                    const std::uint64_t ptIndex = (virtualAddr >> 12) & 0x1FF;
 
                     if ((pml4[pml4Index] & 1) != 0)
                     {
-                         auto* pdpt = reinterpret_cast<std::uint64_t*>((pml4[pml4Index] & ~0xFFFULL));
+                         auto* pdpt = reinterpret_cast<std::uint64_t*>(pml4[pml4Index] & ~0xFFFULL);
                          if ((pdpt[pdptIndex] & 1) != 0)
                          {
-                              auto* pd = reinterpret_cast<std::uint64_t*>((pdpt[pdptIndex] & ~0xFFFULL));
+                              auto* pd = reinterpret_cast<std::uint64_t*>(pdpt[pdptIndex] & ~0xFFFULL);
                               if ((pd[pdIndex] & 1) != 0 && (pd[pdIndex] & (1ULL << 7)) == 0)
                               {
-                                   auto* pt = reinterpret_cast<std::uint64_t*>((pd[pdIndex] & ~0xFFFULL));
+                                   auto* pt = reinterpret_cast<std::uint64_t*>(pd[pdIndex] & ~0xFFFULL);
                                    if ((pt[ptIndex] & 1) != 0)
                                    {
-                                        std::uintptr_t physAddr = pt[ptIndex] & ~0xFFFULL;
+                                        const std::uintptr_t physAddr = pt[ptIndex] & ~0xFFFULL;
                                         pt[ptIndex] = 0;
                                         physicalAllocator.ReleaseFreePage(physAddr);
                                         memory::paging::InvalidatePage(virtualAddr);
@@ -891,15 +861,15 @@ namespace memory
                          }
                     }
                }
-               this->_stats.totalImmediateBytes.fetch_sub(decommitSize, std::memory_order::relaxed);
+               _stats.totalImmediateBytes.fetch_sub(decommitSize, std::memory_order::relaxed);
           }
 
-          if (this->_stats.totalCommittedBytes.load(std::memory_order::relaxed) >= decommitSize)
-               this->_stats.totalCommittedBytes.fetch_sub(decommitSize, std::memory_order::relaxed);
-          if (this->_stats.commitCharge.load(std::memory_order::relaxed) >= decommitSize)
-               this->_stats.commitCharge.fetch_sub(decommitSize, std::memory_order::relaxed);
+          if (_stats.totalCommittedBytes.load(std::memory_order::relaxed) >= decommitSize)
+               _stats.totalCommittedBytes.fetch_sub(decommitSize, std::memory_order::relaxed);
+          if (_stats.commitCharge.load(std::memory_order::relaxed) >= decommitSize)
+               _stats.commitCharge.fetch_sub(decommitSize, std::memory_order::relaxed);
 
-          this->_stats.decommitOperations.fetch_add(1, std::memory_order::relaxed);
+          _stats.decommitOperations.fetch_add(1, std::memory_order::relaxed);
 
           if (decommitStart == nodeStart && decommitEnd == nodeEnd)
           {
@@ -935,18 +905,15 @@ namespace memory
 
                VADEntry decommittedEntry(decommitStart, decommitSize, VADMemoryState::Reserved, node->entry.protection,
                                          node->entry.use, false);
-
                return Insert(decommittedEntry);
           }
 
           const std::size_t frontSize = decommitStart - nodeStart;
-
           node->entry.size = frontSize;
           UpdateMaxEndUpwards(node);
 
           VADEntry decommittedEntry(decommitStart, decommitSize, VADMemoryState::Reserved, node->entry.protection,
                                     node->entry.use, false);
-
           if (!Insert(decommittedEntry))
           {
                debugging::DbgWrite(u8"[SplitVADForDecommit:2] !Insert({})\r\n", decommittedEntry);
@@ -955,7 +922,6 @@ namespace memory
 
           VADEntry backEntry(decommitEnd, nodeEnd - decommitEnd, VADMemoryState::Committed, node->entry.protection,
                              node->entry.use, node->entry.immediatePhysical);
-
           if (!Insert(backEntry))
           {
                Remove(decommitStart);
@@ -992,6 +958,74 @@ namespace memory
           return SplitVADForDecommit(node, baseAddress, size);
      }
 
+     NO_ASAN std::uintptr_t VirtualMemoryAllocator::ReserveVirtualMemory(std::size_t size, MemoryProtection protection,
+                                                                         PFNUse use)
+     {
+          size = AlignUp(size, PAGE_SIZE);
+
+          AcquireLock();
+
+          std::uintptr_t baseAddress = FindFreeRegion(size, 0);
+          if (baseAddress == 0)
+          {
+               _stats.failedAllocations.fetch_add(1, std::memory_order::relaxed);
+               ReleaseLock();
+               return 0;
+          }
+
+          if (ReserveVirtualMemoryFixed(baseAddress, size, protection, use))
+          {
+               _stats.reserveOperations.fetch_add(1, std::memory_order::relaxed);
+               const std::size_t newReserved =
+                   _stats.totalReservedBytes.fetch_add(size, std::memory_order::relaxed) + size;
+               std::size_t currentPeak = _stats.peakReservedBytes.load(std::memory_order::relaxed);
+               while (newReserved > currentPeak && !_stats.peakReservedBytes.compare_exchange_weak(
+                                                       currentPeak, newReserved, std::memory_order::relaxed))
+               {
+               }
+               ReleaseLock();
+               return baseAddress;
+          }
+
+          _stats.failedAllocations.fetch_add(1, std::memory_order::relaxed);
+          ReleaseLock();
+          return 0;
+     }
+
+     NO_ASAN std::uintptr_t VirtualMemoryAllocator::ReserveVirtualMemoryAt(std::uintptr_t hint, std::size_t size,
+                                                                           MemoryProtection protection, PFNUse use)
+     {
+          size = AlignUp(size, PAGE_SIZE);
+
+          AcquireLock();
+
+          std::uintptr_t baseAddress = FindFreeRegion(size, hint);
+          if (baseAddress == 0)
+          {
+               _stats.failedAllocations.fetch_add(1, std::memory_order::relaxed);
+               ReleaseLock();
+               return 0;
+          }
+
+          if (ReserveVirtualMemoryFixed(baseAddress, size, protection, use))
+          {
+               _stats.reserveOperations.fetch_add(1, std::memory_order::relaxed);
+               const std::size_t newReserved =
+                   _stats.totalReservedBytes.fetch_add(size, std::memory_order::relaxed) + size;
+               std::size_t currentPeak = _stats.peakReservedBytes.load(std::memory_order::relaxed);
+               while (newReserved > currentPeak && !_stats.peakReservedBytes.compare_exchange_weak(
+                                                       currentPeak, newReserved, std::memory_order::relaxed))
+               {
+               }
+               ReleaseLock();
+               return baseAddress;
+          }
+
+          _stats.failedAllocations.fetch_add(1, std::memory_order::relaxed);
+          ReleaseLock();
+          return 0;
+     }
+
      NO_ASAN bool VirtualMemoryAllocator::CommitMemory(std::uintptr_t baseAddress, std::size_t size, bool immediate)
      {
           if (size == 0)
@@ -1000,15 +1034,20 @@ namespace memory
                return false;
           }
 
+          AcquireLock();
+
           VADNode* node = FindContaining(baseAddress);
           if (node == nullptr)
           {
                debugging::DbgWrite(u8"[CommitMemory] FindContaining({}) == nullptr\r\n",
                                    reinterpret_cast<void*>(baseAddress));
+               ReleaseLock();
                return false;
           }
 
-          return CommitMemoryRange(node, baseAddress, size, immediate);
+          const bool result = CommitMemoryRange(node, baseAddress, size, immediate);
+          ReleaseLock();
+          return result;
      }
 
      bool VirtualMemoryAllocator::DecommitMemory(std::uintptr_t baseAddress, std::size_t size)
@@ -1019,28 +1058,33 @@ namespace memory
                return false;
           }
 
+          AcquireLock();
+
           VADNode* node = FindContaining(baseAddress);
           if (node == nullptr)
           {
                debugging::DbgWrite(u8"[DecommitMemory] FindContaining({}) == nullptr\r\n",
                                    reinterpret_cast<void*>(baseAddress));
+               ReleaseLock();
                return false;
           }
 
-          return DecommitMemoryRange(node, baseAddress, size);
+          const bool result = DecommitMemoryRange(node, baseAddress, size);
+          ReleaseLock();
+          return result;
      }
 
      [[nodiscard]] std::uintptr_t KeGetPhysicalAddress(void* virtualAddress)
      {
 #ifdef ARCH_X8664
-          std::uintptr_t va = reinterpret_cast<std::uintptr_t>(virtualAddress);
-          std::uintptr_t pageTable = paging::GetCurrentPageTable();
+          const std::uintptr_t va = reinterpret_cast<std::uintptr_t>(virtualAddress);
+          const std::uintptr_t pageTable = paging::GetCurrentPageTable();
 
           auto* pml4 = reinterpret_cast<std::uint64_t*>(pageTable + virtualOffset);
-          std::uint64_t pml4Index = (va >> 39) & 0x1FF;
-          std::uint64_t pdptIndex = (va >> 30) & 0x1FF;
-          std::uint64_t pdIndex = (va >> 21) & 0x1FF;
-          std::uint64_t ptIndex = (va >> 12) & 0x1FF;
+          const std::uint64_t pml4Index = (va >> 39) & 0x1FF;
+          const std::uint64_t pdptIndex = (va >> 30) & 0x1FF;
+          const std::uint64_t pdIndex = (va >> 21) & 0x1FF;
+          const std::uint64_t ptIndex = (va >> 12) & 0x1FF;
 
           if ((pml4[pml4Index] & 1) == 0) return ~0uz;
           auto* pdpt = reinterpret_cast<std::uint64_t*>((pml4[pml4Index] & ~0xFFFULL) + virtualOffset);
@@ -1054,14 +1098,14 @@ namespace memory
           if ((pt[ptIndex] & 1) == 0) return ~0uz;
           return (pt[ptIndex] & ~0xFFFULL) + (va & 0xFFF);
 #elifdef ARCH_ARM64
-          std::uintptr_t va = reinterpret_cast<std::uintptr_t>(virtualAddress);
-          std::uintptr_t pageTable = paging::GetCurrentPageTable();
+          const std::uintptr_t va = reinterpret_cast<std::uintptr_t>(virtualAddress);
+          const std::uintptr_t pageTable = paging::GetCurrentPageTable();
 
           auto* pgd = reinterpret_cast<std::uint64_t*>(pageTable);
-          std::uint64_t pgdIndex = (va >> 39) & 0x1FF;
-          std::uint64_t pudIndex = (va >> 30) & 0x1FF;
-          std::uint64_t pmdIndex = (va >> 21) & 0x1FF;
-          std::uint64_t ptIndex = (va >> 12) & 0x1FF;
+          const std::uint64_t pgdIndex = (va >> 39) & 0x1FF;
+          const std::uint64_t pudIndex = (va >> 30) & 0x1FF;
+          const std::uint64_t pmdIndex = (va >> 21) & 0x1FF;
+          const std::uint64_t ptIndex = (va >> 12) & 0x1FF;
 
           if ((pgd[pgdIndex] & 1) == 0) return ~0uz;
           auto* pud = reinterpret_cast<std::uint64_t*>(pgd[pgdIndex] & ~0xFFFULL);

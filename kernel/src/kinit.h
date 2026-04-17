@@ -14,3 +14,4 @@ extern std::uintptr_t g_imageSize;
 
 void KeInitialiseCpu(std::uintptr_t acpiPhysical);
 void KeRemoveLeftoverMappings();
+void KiIdleLoop();

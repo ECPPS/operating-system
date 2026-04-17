@@ -1,6 +1,7 @@
 #include <utils/identify.h>
 #include <utils/memory.h>
 #include <utils/operations.h>
+#include <utility>
 
 #if defined(ARCH_X8664)
 #include <immintrin.h>
@@ -471,9 +472,45 @@ namespace memory::paging
           return reinterpret_cast<std::uintptr_t>(pml4);
      }
 
+     enum struct PatIndex : std::uint8_t
+     {
+          WB = 0,
+          WT = 1,
+          UCMinus = 2,
+          UC = 3,
+          WC = 4,
+          WP = 5
+     };
+
+     struct CacheEncoding
+     {
+          bool pwt;
+          bool pcd;
+          PatIndex pat;
+     };
+
+     constexpr CacheEncoding KiEncodeCachePolicy(CachePolicy p)
+     {
+          switch (p)
+          {
+          case CachePolicy::WriteBack: return {.pwt = false, .pcd = false, .pat = PatIndex::WB};
+
+          case CachePolicy::WriteThrough: return {.pwt = true, .pcd = false, .pat = PatIndex::WT};
+
+          case CachePolicy::Uncacheable: return {.pwt = false, .pcd = true, .pat = PatIndex::UC};
+
+          case CachePolicy::WriteCombining: return {.pwt = false, .pcd = false, .pat = PatIndex::WC};
+
+          case CachePolicy::WriteProtected: return {.pwt = false, .pcd = false, .pat = PatIndex::WP};
+          }
+
+          return {.pwt = false, .pcd = true, .pat = PatIndex::UC};
+     }
+
      bool MapPage(std::uintptr_t pageTableRoot, const PageMapping& mapping, void* (*allocator)(std::size_t))
      {
           auto* pml4 = reinterpret_cast<X64PageEntry*>(pageTableRoot + virtualOffset);
+          const auto encoding = KiEncodeCachePolicy(mapping.cachePolicy);
 
           for (std::uintptr_t offset = 0; offset < mapping.size; offset += 0x1000)
           {
@@ -532,9 +569,87 @@ namespace memory::paging
                pt[ptIndex].present = 1;
                pt[ptIndex].writable = mapping.writable ? 1 : 0;
                pt[ptIndex].userAccessible = mapping.userAccessible ? 1 : 0;
-               pt[ptIndex].cacheDisable = mapping.cacheDisable ? 1 : 0;
+               pt[ptIndex].cacheDisable = encoding.pcd ? 1 : 0;
+               pt[ptIndex].writeThrough = encoding.pwt ? 1 : 0;
+               pt[ptIndex].noExecute = mapping.executable ? 0 : 1;
           }
 
+          return true;
+     }
+     bool UnmapPage(std::uintptr_t pageTableRoot, std::uintptr_t virtualAddress, bool invalidate)
+     {
+          auto* pml4 = reinterpret_cast<X64PageEntry*>(pageTableRoot + virtualOffset);
+
+          std::uint64_t pml4Index = (virtualAddress >> 39) & 0x1FF;
+          std::uint64_t pdptIndex = (virtualAddress >> 30) & 0x1FF;
+          std::uint64_t pdIndex = (virtualAddress >> 21) & 0x1FF;
+          std::uint64_t ptIndex = (virtualAddress >> 12) & 0x1FF;
+
+          if (!pml4[pml4Index].present) return false;
+          auto* pdpt = reinterpret_cast<X64PageEntry*>(
+              virtualOffset + (static_cast<std::uintptr_t>(pml4[pml4Index].physicalAddress) << 12));
+
+          if (!pdpt[pdptIndex].present) return false;
+          auto* pd = reinterpret_cast<X64PageEntry*>(
+              virtualOffset + (static_cast<std::uintptr_t>(pdpt[pdptIndex].physicalAddress) << 12));
+
+          if (!pd[pdIndex].present || pd[pdIndex].largePage) return false;
+          auto* pt = reinterpret_cast<X64PageEntry*>(virtualOffset +
+                                                     (static_cast<std::uintptr_t>(pd[pdIndex].physicalAddress) << 12));
+
+          if (!pt[ptIndex].present) return false;
+
+          pt[ptIndex].present = 0;
+
+          if (invalidate) InvalidatePage(virtualAddress);
+
+          return true;
+     }
+     bool ProtectPage(std::uintptr_t pageTableRoot, std::uintptr_t virtualAddress, bool isWritable,
+                      bool isUserAccessible, bool isExecutable, void* (*allocator)(std::size_t))
+     {
+          auto* pml4 = reinterpret_cast<X64PageEntry*>(pageTableRoot + virtualOffset);
+          std::uint64_t pml4Index = (virtualAddress >> 39) & 0x1FF;
+          std::uint64_t pdptIndex = (virtualAddress >> 30) & 0x1FF;
+          std::uint64_t pdIndex = (virtualAddress >> 21) & 0x1FF;
+          std::uint64_t ptIndex = (virtualAddress >> 12) & 0x1FF;
+
+          if (!pml4[pml4Index].present) return false;
+          auto* pdpt = reinterpret_cast<X64PageEntry*>(
+              virtualOffset + (static_cast<std::uintptr_t>(pml4[pml4Index].physicalAddress) << 12));
+          if (!pdpt[pdptIndex].present) return false;
+          auto* pd = reinterpret_cast<X64PageEntry*>(
+              virtualOffset + (static_cast<std::uintptr_t>(pdpt[pdptIndex].physicalAddress) << 12));
+          if (!pd[pdIndex].present) return false;
+          if (pd[pdIndex].largePage)
+          {
+               // split
+               auto* pt = static_cast<X64PageEntry*>(allocator(0x1000));
+               if (!pt) return false;
+               ZeroPage(pt);
+               for (std::size_t i = 0; i < 512; ++i)
+               {
+                    pt[i].physicalAddress = ((pd[pdIndex].physicalAddress << 12) + (i << 12)) >> 12;
+                    pt[i].present = pd[pdIndex].present;
+                    pt[i].writable = pd[pdIndex].writable;
+                    pt[i].userAccessible = pd[pdIndex].userAccessible;
+                    pt[i].writeThrough = pd[pdIndex].writeThrough;
+                    pt[i].cacheDisable = pd[pdIndex].cacheDisable;
+                    pt[i].largePage = 0;
+                    pt[i].global = pd[pdIndex].global;
+                    pt[i].noExecute = pd[pdIndex].noExecute;
+               }
+               pd[pdIndex].physicalAddress = (reinterpret_cast<std::uintptr_t>(pt) - virtualOffset) >> 12;
+               pd[pdIndex].largePage = 0;
+               pd[pdIndex].present = 1;
+          }
+          auto* pt = reinterpret_cast<X64PageEntry*>(virtualOffset +
+                                                     (static_cast<std::uintptr_t>(pd[pdIndex].physicalAddress) << 12));
+          if (!pt[ptIndex].present) return false;
+
+          pt[ptIndex].writable = isWritable ? 1 : 0;
+          pt[ptIndex].userAccessible = isUserAccessible ? 1 : 0;
+          pt[ptIndex].noExecute = isExecutable ? 0 : 1;
           return true;
      }
      bool MapPhysicalMemoryDirect(std::uintptr_t pageTableRoot, std::size_t maxPhysicalAddress,

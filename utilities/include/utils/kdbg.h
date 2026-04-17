@@ -19,7 +19,8 @@ namespace debugging
           Default,
           Decimal,
           HexLower,
-          HexUpper
+          HexUpper,
+          Base2
      };
 
      struct FormatSpec
@@ -87,10 +88,11 @@ namespace debugging
      {
           NO_ASAN static void Write(TInteger value, const FormatSpec& spec = {})
           {
-               std::array<char, 32> buffer{};
+               std::array<char, 64> buffer{};
 
                TInteger base = 10;
                if (spec.kind == FormatKind::HexLower || spec.kind == FormatKind::HexUpper) base = TInteger(16);
+               else if (spec.kind == FormatKind::Base2) base = TInteger(2);
 
                auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value, base);
 
@@ -164,7 +166,6 @@ namespace debugging
 
      template <typename... TArgs> NO_ASAN void DbgWrite(const char8_t* format, TArgs&&... args)
      {
-          return;
           const char8_t* ptr = format;
           std::tuple<TArgs...> tupleArgs(std::forward<TArgs>(args)...);
           std::size_t argIndex = 0;
@@ -200,6 +201,7 @@ namespace debugging
                          case 'x': spec.kind = FormatKind::HexLower; break;
                          case 'X': spec.kind = FormatKind::HexUpper; break;
                          case 'd': spec.kind = FormatKind::Decimal; break;
+                         case 'b': spec.kind = FormatKind::Base2; break;
                          default: break;
                          }
 

@@ -21,6 +21,15 @@ namespace memory
           bool global{};
      };
 
+     enum struct CachePolicy : std::uint8_t
+     {
+          Uncacheable,
+          WriteCombining,
+          WriteThrough,
+          WriteBack,
+          WriteProtected,
+     };
+
      struct PageMapping
      {
           std::uintptr_t virtualAddress{};
@@ -28,10 +37,9 @@ namespace memory
           std::size_t size{};
           bool writable{};
           bool userAccessible{};
-          bool cacheDisable{};
           bool executable{};
-
-          std::uint8_t attrIndex{};
+          bool global{};
+          CachePolicy cachePolicy = CachePolicy::WriteBack;
      };
 
      namespace paging
@@ -39,6 +47,9 @@ namespace memory
           constexpr std::size_t GetPageSize() noexcept;
           std::uintptr_t CreatePageTable(void* (*allocator)(std::size_t));
           bool MapPage(std::uintptr_t pageTableRoot, const PageMapping& mapping, void* (*allocator)(std::size_t));
+          bool UnmapPage(std::uintptr_t pageTableRoot, std::uintptr_t virtualAddress, bool invalidate = true);
+          bool ProtectPage(std::uintptr_t pageTableRoot, std::uintptr_t virtualAddress, bool isWritable,
+                           bool isUserAccessible, bool isExecutable, void* (*allocator)(std::size_t));
 
           bool MapPhysicalMemoryDirect(std::uintptr_t pageTableRoot, std::size_t maxPhysicalAddress,
                                        void* (*allocator)(std::size_t), std::size_t startOffset = 0);
